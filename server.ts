@@ -402,10 +402,10 @@ bolt.event('app_mention', async ({ event }) => {
   const text = (event.text ?? '').replace(/<@[A-Z0-9]+>\s*/g, '').trim()
   const eventTs = event.ts ?? ''
 
-  // Reset thread — Claude's next reply creates the new thread parent
-  activeThreadTs = null
-  saveSession({ threadTs: null })
-  console.error('[slack-channel] app_mention — thread reset, new thread on next reply')
+  // The @mention message becomes the thread parent
+  activeThreadTs = eventTs
+  saveSession({ threadTs: activeThreadTs })
+  console.error(`[slack-channel] app_mention — new thread rooted at ${eventTs}`)
 
   await mcp.notification({
     method: 'notifications/claude/channel',

@@ -117,6 +117,8 @@ TOOLS:
 - reply: Respond within the active thread. Use for replying to user messages and ongoing conversation.
 - new_thread: Start a fresh thread. Use to proactively reach the user (status updates, questions, alerts),
   or after /compact or /clear. Pass text to post the first message immediately.
+- react: Add an emoji reaction to a message (e.g. white_check_mark, eyes, thumbsup). Use to acknowledge
+  without a full reply. Pass the event_ts from the inbound <channel> tag.
 - Keep messages concise — the user reads these on mobile.
 
 THREAD LIFECYCLE:
@@ -250,6 +252,24 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: 'react',
+      description: 'Add an emoji reaction to a message. Use to acknowledge a message without a full reply (e.g. checkmark, eyes, thumbsup).',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          emoji: {
+            type: 'string',
+            description: 'Emoji name without colons (e.g. "white_check_mark", "eyes", "thumbsup", "rocket").',
+          },
+          event_ts: {
+            type: 'string',
+            description: 'The event_ts from the inbound <channel> tag of the message to react to.',
+          },
+        },
+        required: ['emoji', 'event_ts'],
+      },
+    },
   ],
 }))
 
@@ -261,6 +281,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     // Always post to the configured channel, ignore passed channel_id
     await postThreaded({ text })
     return { content: [{ type: 'text' as const, text: 'sent' }] }
+  }
+
+  if (req.params.name === 'react') {
+    const { emoji, event_ts } = req.params.arguments as {
+      emoji: string
+      event_ts: string
+    }
+    await bolt.client.reactions.add({
+      channel: SLACK_CHANNEL_ID,
+      name: emoji,
+      timestamp: event_ts,
+    })
+    return { content: [{ type: 'text' as const, text: 'reacted' }] }
   }
 
   if (req.params.name === 'new_thread') {
@@ -381,8 +414,6 @@ bolt.message(async ({ message }) => {
 
   // Top-level message (no thread) — ignore, only @mentions start threads
   if (!threadTs) return
-
-  console.error(`[slack-channel] DEBUG thread check: msg.thread_ts=${threadTs} activeThreadTs=${activeThreadTs}`)
 
   // Active thread reply — forward directly
   if (threadTs === activeThreadTs) {

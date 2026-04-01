@@ -323,16 +323,6 @@ bolt.message(async ({ message }) => {
   // Record the active DM channel for permission relay
   activeDmChannelId = channelId
 
-  // If user replies inside the active thread, keep using it.
-  // If user sends a top-level message (no thread_ts), that becomes the new thread context.
-  if (msg.thread_ts && msg.thread_ts === activeThreadTs) {
-    // Message is in the active thread — good, nothing to update
-  } else if (!msg.thread_ts) {
-    // Top-level message — if we have no thread yet, the next reply will start one.
-    // If user explicitly sends top-level while a thread exists, respect it
-    // (they may want a fresh start).
-  }
-
   await mcp.notification({
     method: 'notifications/claude/channel',
     params: {
@@ -345,6 +335,41 @@ bolt.message(async ({ message }) => {
     },
   })
   console.error(`[slack-channel] forwarded DM from ${msg.user} to Claude`)
+})
+
+// App mention — starts a new thread, resets the previous one
+bolt.event('app_mention', async ({ event }) => {
+  if (event.user !== ALLOWED_USER_ID) {
+    console.error(
+      `[slack-channel] dropped app_mention from ungated user: ${event.user}`,
+    )
+    return
+  }
+
+  const channelId = event.channel ?? ''
+  const eventTs = event.ts ?? ''
+  // Strip the bot mention tag (e.g. "<@U0123ABC> hello" → "hello")
+  const text = (event.text ?? '').replace(/<@[A-Z0-9]+>\s*/g, '').trim()
+
+  activeDmChannelId = channelId
+
+  // Reset thread — next reply starts a new one
+  activeThreadTs = null
+  saveSession({ threadTs: null, channelId: activeDmChannelId })
+  console.error('[slack-channel] app_mention received — thread reset')
+
+  await mcp.notification({
+    method: 'notifications/claude/channel',
+    params: {
+      content: text || '(new session)',
+      meta: {
+        slack_user_id: event.user ?? '',
+        channel_id: channelId,
+        event_ts: eventTs,
+      },
+    },
+  })
+  console.error(`[slack-channel] forwarded app_mention from ${event.user} to Claude`)
 })
 
 // Permission relay — receive verdict from Allow/Deny button click

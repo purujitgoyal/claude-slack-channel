@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { App } from '@slack/bolt'
@@ -15,6 +15,32 @@ import { z } from 'zod'
 const CHANNELS_DIR = join(homedir(), '.claude', 'channels', 'slack')
 const ENV_PATH = join(CHANNELS_DIR, '.env')
 const SESSION_PATH = join(CHANNELS_DIR, 'session.json')
+const PID_PATH = join(CHANNELS_DIR, 'server.pid')
+
+// Kill stale server process if one exists
+try {
+  if (existsSync(PID_PATH)) {
+    const oldPid = parseInt(readFileSync(PID_PATH, 'utf8').trim(), 10)
+    if (oldPid && oldPid !== process.pid) {
+      try {
+        process.kill(oldPid)
+        console.error(`[slack-channel] killed stale process ${oldPid}`)
+      } catch {
+        // process already dead — fine
+      }
+    }
+  }
+} catch {
+  // ignore
+}
+
+// Write our PID
+try {
+  if (!existsSync(CHANNELS_DIR)) mkdirSync(CHANNELS_DIR, { recursive: true })
+  writeFileSync(PID_PATH, String(process.pid), 'utf8')
+} catch {
+  // non-fatal
+}
 
 function loadEnv(path: string): Record<string, string> {
   if (!existsSync(path)) {
@@ -488,13 +514,16 @@ bolt.action(/^(allow|deny)_[a-km-z]{5}$/, async ({ action, ack, body, client }) 
 // Startup + graceful shutdown
 // ---------------------------------------------------------------------------
 
-process.on('SIGINT', () => process.exit(0))
-process.on('SIGTERM', () => process.exit(0))
+function cleanup() {
+  saveSession({ threadTs: null })
+  try { unlinkSync(PID_PATH) } catch {}
+}
+
+process.on('SIGINT', () => { cleanup(); process.exit(0) })
+process.on('SIGTERM', () => { cleanup(); process.exit(0) })
 
 process.stdin.on('close', () => {
-  // Clear session so the next fresh session doesn't reuse an old thread.
-  // Resume sessions will start a new thread via @mention or new_thread.
-  saveSession({ threadTs: null })
+  cleanup()
   bolt.stop().finally(() => process.exit(0))
 })
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { App } from '@slack/bolt'
@@ -12,7 +12,9 @@ import { z } from 'zod'
 // Config loading
 // ---------------------------------------------------------------------------
 
-const ENV_PATH = join(homedir(), '.claude', 'channels', 'slack', '.env')
+const CHANNELS_DIR = join(homedir(), '.claude', 'channels', 'slack')
+const ENV_PATH = join(CHANNELS_DIR, '.env')
+const SESSION_PATH = join(CHANNELS_DIR, 'session.json')
 
 function loadEnv(path: string): Record<string, string> {
   if (!existsSync(path)) {
@@ -44,12 +46,41 @@ if (!SLACK_BOT_TOKEN || !SLACK_APP_TOKEN || !ALLOWED_USER_ID) {
 }
 
 // ---------------------------------------------------------------------------
-// State
+// Session state — persisted to disk for resume support
 // ---------------------------------------------------------------------------
 
-// Tracks the most recent DM channel from the allowed user so permission
-// prompts know where to send Block Kit messages.
+type SessionState = {
+  threadTs: string | null
+  channelId: string | null
+}
+
+function loadSession(): SessionState {
+  try {
+    if (existsSync(SESSION_PATH)) {
+      return JSON.parse(readFileSync(SESSION_PATH, 'utf8'))
+    }
+  } catch {
+    // corrupt file — start fresh
+  }
+  return { threadTs: null, channelId: null }
+}
+
+function saveSession(state: SessionState) {
+  try {
+    if (!existsSync(CHANNELS_DIR)) mkdirSync(CHANNELS_DIR, { recursive: true })
+    writeFileSync(SESSION_PATH, JSON.stringify(state), 'utf8')
+  } catch (err) {
+    console.error('[slack-channel] failed to save session state:', err)
+  }
+}
+
 let activeDmChannelId: string | null = null
+let activeThreadTs: string | null = null
+
+// Load persisted session (supports resume)
+const savedSession = loadSession()
+activeDmChannelId = savedSession.channelId
+activeThreadTs = savedSession.threadTs
 
 // ---------------------------------------------------------------------------
 // MCP server
@@ -61,12 +92,19 @@ You are connected to the user's Slack workspace via a personal DM bridge.
 Inbound messages arrive as:
   <channel source="slack" slack_user_id="U01..." channel_id="D01..." event_ts="...">message text</channel>
 
-Always reply using the reply tool, passing the channel_id from the tag.
-Keep replies concise — this is a mobile Slack DM, not a terminal.
+REPLY BEHAVIOR:
+- Always reply using the reply tool, passing the channel_id from the tag.
+- Keep replies concise — this is a mobile Slack DM, not a terminal.
+- All replies are automatically threaded — one Claude Code session = one Slack thread.
 
-When you receive a permission relay prompt (tool approval), the server handles
-it automatically by sending a Block Kit message to the user's Slack DM with
-Allow/Deny buttons. You do NOT need to do anything for permission relay.
+THREAD LIFECYCLE:
+- Call the new_thread tool after a /compact or /clear to start a fresh Slack thread.
+- On resume, the existing thread is continued automatically.
+
+PERMISSION RELAY:
+- When Claude Code shows a tool-approval dialog, the server automatically forwards it
+  to the user's Slack DM as Block Kit buttons (Allow/Deny). You do NOT need to handle this.
+- Permission prompts are posted in the active thread.
 
 This channel is primarily used in multi-repo coordination sessions — the user
 may be away from the terminal and relying on Slack to monitor progress and
@@ -88,6 +126,34 @@ const mcp = new Server(
 )
 
 // ---------------------------------------------------------------------------
+// Threading helper — posts a message, starting or continuing a thread
+// ---------------------------------------------------------------------------
+
+async function postThreaded(
+  channelId: string,
+  opts: {
+    text: string
+    blocks?: any[]
+  },
+): Promise<string | undefined> {
+  const result = await bolt.client.chat.postMessage({
+    channel: channelId,
+    text: opts.text,
+    blocks: opts.blocks,
+    thread_ts: activeThreadTs ?? undefined,
+  })
+
+  // If this is the first message (no active thread), the response ts becomes
+  // the thread parent. All subsequent messages reply to it.
+  if (!activeThreadTs && result.ts) {
+    activeThreadTs = result.ts
+    saveSession({ threadTs: activeThreadTs, channelId: activeDmChannelId })
+  }
+
+  return result.ts
+}
+
+// ---------------------------------------------------------------------------
 // MCP tools
 // ---------------------------------------------------------------------------
 
@@ -95,7 +161,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'reply',
-      description: 'Send a message back to the user in the Slack DM channel.',
+      description: 'Send a message back to the user in the Slack DM channel. Messages are automatically threaded.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -112,6 +178,15 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['channel_id', 'text'],
       },
     },
+    {
+      name: 'new_thread',
+      description:
+        'Start a fresh Slack thread. Call this after /compact or /clear to keep conversations organized. The next reply will become the new thread parent.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
   ],
 }))
 
@@ -121,9 +196,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       channel_id: string
       text: string
     }
-    await bolt.client.chat.postMessage({ channel: channel_id, text })
+    await postThreaded(channel_id, { text })
     return { content: [{ type: 'text' as const, text: 'sent' }] }
   }
+
+  if (req.params.name === 'new_thread') {
+    activeThreadTs = null
+    saveSession({ threadTs: null, channelId: activeDmChannelId })
+    console.error('[slack-channel] thread reset — next reply starts a new thread')
+    return {
+      content: [
+        { type: 'text' as const, text: 'Thread reset. Next reply will start a new thread.' },
+      ],
+    }
+  }
+
   throw new Error(`unknown tool: ${req.params.name}`)
 })
 
@@ -153,8 +240,7 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   const preview =
     input_preview.length > 200 ? input_preview.slice(0, 197) + '...' : input_preview
 
-  await bolt.client.chat.postMessage({
-    channel: activeDmChannelId,
+  await postThreaded(activeDmChannelId, {
     text: `Claude wants to use \`${tool_name}\` — tap Allow or Deny`,
     blocks: [
       {
@@ -178,14 +264,14 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
         elements: [
           {
             type: 'button',
-            text: { type: 'plain_text', text: '✅ Allow' },
+            text: { type: 'plain_text', text: 'Allow' },
             style: 'primary',
             action_id: `allow_${request_id}`,
             value: `allow:${request_id}`,
           },
           {
             type: 'button',
-            text: { type: 'plain_text', text: '❌ Deny' },
+            text: { type: 'plain_text', text: 'Deny' },
             style: 'danger',
             action_id: `deny_${request_id}`,
             value: `deny:${request_id}`,
@@ -212,7 +298,6 @@ const bolt = new App({
 
 // Inbound DM messages
 bolt.message(async ({ message }) => {
-  // Skip subtypes (edits, deletions, bot messages, etc.)
   if (message.subtype !== undefined) return
 
   const msg = message as {
@@ -220,6 +305,7 @@ bolt.message(async ({ message }) => {
     text?: string
     channel?: string
     ts?: string
+    thread_ts?: string
   }
 
   // Sender gate
@@ -236,6 +322,16 @@ bolt.message(async ({ message }) => {
 
   // Record the active DM channel for permission relay
   activeDmChannelId = channelId
+
+  // If user replies inside the active thread, keep using it.
+  // If user sends a top-level message (no thread_ts), that becomes the new thread context.
+  if (msg.thread_ts && msg.thread_ts === activeThreadTs) {
+    // Message is in the active thread — good, nothing to update
+  } else if (!msg.thread_ts) {
+    // Top-level message — if we have no thread yet, the next reply will start one.
+    // If user explicitly sends top-level while a thread exists, respect it
+    // (they may want a fresh start).
+  }
 
   await mcp.notification({
     method: 'notifications/claude/channel',
@@ -255,7 +351,6 @@ bolt.message(async ({ message }) => {
 bolt.action(/^(allow|deny)_[a-km-z]{5}$/, async ({ action, ack, body, client }) => {
   await ack()
 
-  // Gate: only the allowlisted user can approve/deny
   const actingUser = body.user?.id
   if (actingUser !== ALLOWED_USER_ID) {
     console.error(
@@ -272,7 +367,6 @@ bolt.action(/^(allow|deny)_[a-km-z]{5}$/, async ({ action, ack, body, client }) 
   const behavior = value.slice(0, colonIdx) as 'allow' | 'deny'
   const request_id = value.slice(colonIdx + 1)
 
-  // Send verdict to Claude Code
   await mcp.notification({
     method: 'notifications/claude/channel/permission',
     params: { request_id, behavior },
@@ -294,8 +388,8 @@ bolt.action(/^(allow|deny)_[a-km-z]{5}$/, async ({ action, ack, body, client }) 
       ts: message.ts,
       text:
         behavior === 'allow'
-          ? `✅ Allowed — \`${request_id}\``
-          : `❌ Denied — \`${request_id}\``,
+          ? `Allowed — \`${request_id}\``
+          : `Denied — \`${request_id}\``,
       blocks: [
         {
           type: 'section',
@@ -303,8 +397,8 @@ bolt.action(/^(allow|deny)_[a-km-z]{5}$/, async ({ action, ack, body, client }) 
             type: 'mrkdwn',
             text:
               behavior === 'allow'
-                ? `✅ *Allowed* — request \`${request_id}\``
-                : `❌ *Denied* — request \`${request_id}\``,
+                ? '*Allowed* — request `' + request_id + '`'
+                : '*Denied* — request `' + request_id + '`',
           },
         },
       ],
@@ -319,7 +413,6 @@ bolt.action(/^(allow|deny)_[a-km-z]{5}$/, async ({ action, ack, body, client }) 
 process.on('SIGINT', () => process.exit(0))
 process.on('SIGTERM', () => process.exit(0))
 
-// stdin close = Claude Code shut down the subprocess
 process.stdin.on('close', () => {
   bolt.stop().finally(() => process.exit(0))
 })

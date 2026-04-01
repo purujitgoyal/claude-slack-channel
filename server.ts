@@ -37,10 +37,11 @@ const env = loadEnv(ENV_PATH)
 const SLACK_BOT_TOKEN = env['SLACK_BOT_TOKEN'] ?? ''
 const SLACK_APP_TOKEN = env['SLACK_APP_TOKEN'] ?? ''
 const ALLOWED_USER_ID = env['ALLOWED_SLACK_USER_ID'] ?? ''
+const SLACK_CHANNEL_ID = env['SLACK_CHANNEL_ID'] ?? ''
 
-if (!SLACK_BOT_TOKEN || !SLACK_APP_TOKEN || !ALLOWED_USER_ID) {
+if (!SLACK_BOT_TOKEN || !SLACK_APP_TOKEN || !ALLOWED_USER_ID || !SLACK_CHANNEL_ID) {
   throw new Error(
-    'SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and ALLOWED_SLACK_USER_ID must all be set in ' +
+    'SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ALLOWED_SLACK_USER_ID, and SLACK_CHANNEL_ID must all be set in ' +
     ENV_PATH,
   )
 }
@@ -51,18 +52,18 @@ if (!SLACK_BOT_TOKEN || !SLACK_APP_TOKEN || !ALLOWED_USER_ID) {
 
 type SessionState = {
   threadTs: string | null
-  channelId: string | null
 }
 
 function loadSession(): SessionState {
   try {
     if (existsSync(SESSION_PATH)) {
-      return JSON.parse(readFileSync(SESSION_PATH, 'utf8'))
+      const data = JSON.parse(readFileSync(SESSION_PATH, 'utf8'))
+      return { threadTs: data.threadTs ?? null }
     }
   } catch {
     // corrupt file — start fresh
   }
-  return { threadTs: null, channelId: null }
+  return { threadTs: null }
 }
 
 function saveSession(state: SessionState) {
@@ -74,12 +75,10 @@ function saveSession(state: SessionState) {
   }
 }
 
-let activeDmChannelId: string | null = null
 let activeThreadTs: string | null = null
 
 // Load persisted session (supports resume)
 const savedSession = loadSession()
-activeDmChannelId = savedSession.channelId
 activeThreadTs = savedSession.threadTs
 
 // ---------------------------------------------------------------------------
@@ -87,24 +86,27 @@ activeThreadTs = savedSession.threadTs
 // ---------------------------------------------------------------------------
 
 const INSTRUCTIONS = `
-You are connected to the user's Slack workspace via a personal DM bridge.
+You are connected to the user's Slack workspace via a channel bridge in #purujit-cc.
 
 Inbound messages arrive as:
-  <channel source="slack" slack_user_id="U01..." channel_id="D01..." event_ts="...">message text</channel>
+  <channel source="slack" slack_user_id="U01..." channel_id="C01..." event_ts="...">message text</channel>
 
 REPLY BEHAVIOR:
-- Always reply using the reply tool, passing the channel_id from the tag.
-- Keep replies concise — this is a mobile Slack DM, not a terminal.
+- Always reply using the reply tool.
+- Keep replies concise — the user reads these on mobile.
 - All replies are automatically threaded — one Claude Code session = one Slack thread.
 
 THREAD LIFECYCLE:
+- The user @mentions the bot in #purujit-cc to start a new thread.
+- Replies in the active thread are forwarded to you.
+- If the user replies in an old thread, the server starts a new thread with a summary
+  of the old thread's history, so you get that context automatically.
 - Call the new_thread tool after a /compact or /clear to start a fresh Slack thread.
 - On resume, the existing thread is continued automatically.
 
 PERMISSION RELAY:
 - When Claude Code shows a tool-approval dialog, the server automatically forwards it
-  to the user's Slack DM as Block Kit buttons (Allow/Deny). You do NOT need to handle this.
-- Permission prompts are posted in the active thread.
+  to the active thread as Block Kit buttons (Allow/Deny). You do NOT need to handle this.
 
 This channel is primarily used in multi-repo coordination sessions — the user
 may be away from the terminal and relying on Slack to monitor progress and
@@ -112,7 +114,7 @@ approve tool use.
 `.trim()
 
 const mcp = new Server(
-  { name: 'slack', version: '0.1.0' },
+  { name: 'slack', version: '0.2.0' },
   {
     capabilities: {
       experimental: {
@@ -129,15 +131,12 @@ const mcp = new Server(
 // Threading helper — posts a message, starting or continuing a thread
 // ---------------------------------------------------------------------------
 
-async function postThreaded(
-  channelId: string,
-  opts: {
-    text: string
-    blocks?: any[]
-  },
-): Promise<string | undefined> {
+async function postThreaded(opts: {
+  text: string
+  blocks?: any[]
+}): Promise<string | undefined> {
   const result = await bolt.client.chat.postMessage({
-    channel: channelId,
+    channel: SLACK_CHANNEL_ID,
     text: opts.text,
     blocks: opts.blocks,
     thread_ts: activeThreadTs ?? undefined,
@@ -147,10 +146,46 @@ async function postThreaded(
   // the thread parent. All subsequent messages reply to it.
   if (!activeThreadTs && result.ts) {
     activeThreadTs = result.ts
-    saveSession({ threadTs: activeThreadTs, channelId: activeDmChannelId })
+    saveSession({ threadTs: activeThreadTs })
   }
 
   return result.ts
+}
+
+// ---------------------------------------------------------------------------
+// Old thread summary helper
+// ---------------------------------------------------------------------------
+
+async function fetchThreadSummary(threadTs: string): Promise<string> {
+  try {
+    const result = await bolt.client.conversations.replies({
+      channel: SLACK_CHANNEL_ID,
+      ts: threadTs,
+      limit: 50,
+    })
+
+    const messages = result.messages ?? []
+    const lines: string[] = []
+    let totalLen = 0
+
+    for (const msg of messages) {
+      const who = msg.bot_id ? 'bot' : 'user'
+      const text = (msg.text ?? '').replace(/<@[A-Z0-9]+>\s*/g, '').trim()
+      if (!text) continue
+      const line = `[${who}]: ${text}`
+      if (totalLen + line.length > 2000) {
+        lines.push('... (truncated)')
+        break
+      }
+      lines.push(line)
+      totalLen += line.length
+    }
+
+    return lines.join('\n')
+  } catch (err) {
+    console.error('[slack-channel] failed to fetch thread summary:', err)
+    return '(could not fetch previous thread history)'
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,14 +196,14 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'reply',
-      description: 'Send a message back to the user in the Slack DM channel. Messages are automatically threaded.',
+      description: 'Send a message back to the user in the Slack channel. Messages are automatically threaded.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           channel_id: {
             type: 'string',
             description:
-              'The Slack channel ID from the inbound <channel> tag (e.g. D01XXXXXXXX).',
+              'The Slack channel ID from the inbound <channel> tag. (Used for interface consistency; the server routes to the configured channel.)',
           },
           text: {
             type: 'string',
@@ -192,17 +227,18 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'reply') {
-    const { channel_id, text } = req.params.arguments as {
+    const { text } = req.params.arguments as {
       channel_id: string
       text: string
     }
-    await postThreaded(channel_id, { text })
+    // Always post to the configured channel, ignore passed channel_id
+    await postThreaded({ text })
     return { content: [{ type: 'text' as const, text: 'sent' }] }
   }
 
   if (req.params.name === 'new_thread') {
     activeThreadTs = null
-    saveSession({ threadTs: null, channelId: activeDmChannelId })
+    saveSession({ threadTs: null })
     console.error('[slack-channel] thread reset — next reply starts a new thread')
     return {
       content: [
@@ -229,18 +265,11 @@ const PermissionRequestSchema = z.object({
 })
 
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
-  if (!activeDmChannelId) {
-    console.error(
-      '[slack-channel] permission_request received but no active DM channel — skipping relay (answer in the terminal)',
-    )
-    return
-  }
-
   const { request_id, tool_name, description, input_preview } = params
   const preview =
     input_preview.length > 200 ? input_preview.slice(0, 197) + '...' : input_preview
 
-  await postThreaded(activeDmChannelId, {
+  await postThreaded({
     text: `Claude wants to use \`${tool_name}\` — tap Allow or Deny`,
     blocks: [
       {
@@ -296,7 +325,7 @@ const bolt = new App({
   logLevel: 'error' as const,
 })
 
-// Inbound DM messages
+// Inbound channel messages — only forward active thread replies
 bolt.message(async ({ message }) => {
   if (message.subtype !== undefined) return
 
@@ -309,62 +338,87 @@ bolt.message(async ({ message }) => {
   }
 
   // Sender gate
-  if (msg.user !== ALLOWED_USER_ID) {
-    console.error(
-      `[slack-channel] dropped message from ungated user: ${msg.user}`,
-    )
+  if (msg.user !== ALLOWED_USER_ID) return
+
+  const threadTs = msg.thread_ts
+  const text = msg.text ?? ''
+  const eventTs = msg.ts ?? ''
+
+  // Top-level message (no thread) — ignore, only @mentions start threads
+  if (!threadTs) return
+
+  // Active thread reply — forward directly
+  if (threadTs === activeThreadTs) {
+    await mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: text,
+        meta: {
+          slack_user_id: msg.user ?? '',
+          channel_id: SLACK_CHANNEL_ID,
+          event_ts: eventTs,
+        },
+      },
+    })
+    console.error(`[slack-channel] forwarded thread reply to Claude`)
     return
   }
 
-  const channelId = msg.channel ?? ''
-  const eventTs = msg.ts ?? ''
-  const text = msg.text ?? ''
+  // Old thread reply — fetch summary, start new thread, forward with context
+  console.error(`[slack-channel] reply in old thread ${threadTs} — fetching summary`)
+  const summary = await fetchThreadSummary(threadTs)
 
-  // Record the active DM channel for permission relay
-  activeDmChannelId = channelId
+  // Post a note in the old thread
+  await bolt.client.chat.postMessage({
+    channel: SLACK_CHANNEL_ID,
+    thread_ts: threadTs,
+    text: '→ Continued in new thread',
+  })
 
+  // Reset active thread — next postThreaded call will create a new one
+  activeThreadTs = null
+  saveSession({ threadTs: null })
+
+  // Forward to Claude with old thread context
   await mcp.notification({
     method: 'notifications/claude/channel',
     params: {
-      content: text,
+      content: `[Context from previous thread]\n${summary}\n\n[New message]\n${text}`,
       meta: {
         slack_user_id: msg.user ?? '',
-        channel_id: channelId,
+        channel_id: SLACK_CHANNEL_ID,
         event_ts: eventTs,
       },
     },
   })
-  console.error(`[slack-channel] forwarded DM from ${msg.user} to Claude`)
+  console.error(`[slack-channel] forwarded old thread reply with summary to Claude`)
 })
 
-// App mention — forward to Claude (same as DM, but strip the @mention tag)
+// App mention — starts a new thread
 bolt.event('app_mention', async ({ event }) => {
-  if (event.user !== ALLOWED_USER_ID) {
-    console.error(
-      `[slack-channel] dropped app_mention from ungated user: ${event.user}`,
-    )
-    return
-  }
+  if (event.user !== ALLOWED_USER_ID) return
 
-  const channelId = event.channel ?? ''
-  const eventTs = event.ts ?? ''
   // Strip the bot mention tag (e.g. "<@U0123ABC> hello" → "hello")
   const text = (event.text ?? '').replace(/<@[A-Z0-9]+>\s*/g, '').trim()
+  const eventTs = event.ts ?? ''
 
-  activeDmChannelId = channelId
+  // Reset thread — Claude's next reply creates the new thread parent
+  activeThreadTs = null
+  saveSession({ threadTs: null })
+  console.error('[slack-channel] app_mention — thread reset, new thread on next reply')
 
   await mcp.notification({
     method: 'notifications/claude/channel',
     params: {
-      content: text || '(ping)',
+      content: text || '(new session)',
       meta: {
         slack_user_id: event.user ?? '',
-        channel_id: channelId,
+        channel_id: SLACK_CHANNEL_ID,
         event_ts: eventTs,
       },
     },
   })
-  console.error(`[slack-channel] forwarded app_mention from ${event.user} to Claude`)
+  console.error(`[slack-channel] forwarded app_mention to Claude`)
 })
 
 // Permission relay — receive verdict from Allow/Deny button click
@@ -372,12 +426,7 @@ bolt.action(/^(allow|deny)_[a-km-z]{5}$/, async ({ action, ack, body, client }) 
   await ack()
 
   const actingUser = body.user?.id
-  if (actingUser !== ALLOWED_USER_ID) {
-    console.error(
-      `[slack-channel] permission action from ungated user ${actingUser} — ignored`,
-    )
-    return
-  }
+  if (actingUser !== ALLOWED_USER_ID) return
 
   const btn = action as { value?: string }
   const value = btn.value ?? ''
@@ -392,15 +441,13 @@ bolt.action(/^(allow|deny)_[a-km-z]{5}$/, async ({ action, ack, body, client }) 
     params: { request_id, behavior },
   })
   console.error(
-    `[slack-channel] verdict ${behavior} for request ${request_id} sent to Claude Code`,
+    `[slack-channel] verdict ${behavior} for request ${request_id}`,
   )
 
   // Update the Slack message — replace buttons with outcome text
   const message = body.message as { ts?: string } | undefined
   const channelId =
-    (body.container as { channel_id?: string } | undefined)?.channel_id ??
-    activeDmChannelId ??
-    ''
+    (body.container as { channel_id?: string } | undefined)?.channel_id ?? SLACK_CHANNEL_ID
 
   if (message?.ts && channelId) {
     await client.chat.update({
@@ -441,4 +488,4 @@ await bolt.start()
 console.error('[slack-channel] Bolt Socket Mode connected')
 
 await mcp.connect(new StdioServerTransport())
-console.error('[slack-channel] MCP connected')
+console.error('[slack-channel] MCP connected — channel: ' + SLACK_CHANNEL_ID)

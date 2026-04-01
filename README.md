@@ -1,9 +1,10 @@
 # claude-slack-channel
 
-A Claude Code channel plugin that bridges your Slack DMs to a Claude Code session.
+A Claude Code channel plugin that bridges a Slack channel to a Claude Code session.
 
-- **Two-way**: send Claude a message from Slack, Claude replies back
-- **Permission relay**: tool-use approval dialogs appear in Slack as Block Kit messages with Allow/Deny buttons — no need to watch the terminal
+- **Two-way**: @mention the bot, Claude replies in a thread
+- **Permission relay**: tool-use approval dialogs appear as Block Kit messages with Allow/Deny buttons — no need to watch the terminal
+- **Threaded**: one session = one thread. Old thread replies auto-start a new thread with context summary
 - **Personal use**: only your Slack user ID can trigger messages or approve tool calls
 
 Primary use case: multi-repo autonomous sessions where you want to monitor progress and approve tool use from your phone without being at the machine.
@@ -24,14 +25,15 @@ Go to [api.slack.com/apps](https://api.slack.com/apps) → Create New App → Fr
 - Save this as `SLACK_APP_TOKEN` (starts with `xapp-`)
 
 **Bot Token Scopes** (Features → OAuth & Permissions → Scopes → Bot Token Scopes)
-- `chat:write` — send messages
+- `chat:write` — send messages and update them
 - `reactions:write` — add emoji reactions
-- `im:history` — read DM history
-- `im:read` — list DM channels
+- `groups:history` — read messages and threads in private channels
 
 **Event Subscriptions** (Features → Event Subscriptions)
 - Enable Events
-- Under "Subscribe to bot events" add: `message.im`
+- Under "Subscribe to bot events" add:
+  - `app_mention` — @mentions of the bot
+  - `message.groups` — messages in private channels (for thread replies)
 
 **Interactivity & Shortcuts** (Features → Interactivity & Shortcuts)
 - Enable Interactivity (no Request URL needed — Socket Mode handles delivery)
@@ -39,6 +41,11 @@ Go to [api.slack.com/apps](https://api.slack.com/apps) → Create New App → Fr
 **Install the app**
 - Settings → Install App → Install to Workspace
 - Copy the Bot User OAuth Token — save as `SLACK_BOT_TOKEN` (starts with `xoxb-`)
+
+**Channel setup**
+- Create a private channel (e.g. `#purujit-cc`)
+- Invite the bot to the channel
+- Get the Channel ID: right-click channel → View channel details → scroll to bottom
 
 **Find your Slack user ID**
 - In Slack: click your profile picture → View Profile → ⋯ → Copy member ID
@@ -52,6 +59,7 @@ Tokens live in `~/.claude/channels/slack/.env` (never committed):
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 ALLOWED_SLACK_USER_ID=U01XXXXXXXX
+SLACK_CHANNEL_ID=C01XXXXXXXX
 ```
 
 ```bash
@@ -86,12 +94,19 @@ Claude Code reads `.mcp.json`, spawns `server.ts` as a subprocess, and connects 
 ## Using it
 
 1. Start Claude Code with the flag above
-2. Send a DM to your bot in Slack
-3. Claude receives the message and can reply back via the `reply` tool
-4. When Claude needs to run a tool that requires approval, you'll see a Block Kit message in your Slack DM with **Allow** and **Deny** buttons
-5. Tap Allow — the local terminal dialog closes and the tool runs
+2. @mention the bot in your channel (e.g. `@Claude Code Dev - Purujit check on the workers`)
+3. Claude receives the message and replies in a new thread
+4. Reply in the thread to continue the conversation
+5. When Claude needs tool approval, you'll see Allow/Deny buttons in the thread
+6. If you reply in an old thread, a new thread is started with a summary of the old thread's history
 
-The local terminal dialog stays open in parallel, so you can also approve there.
+### Thread lifecycle
+
+- **@mention** → starts a new thread (resets the previous one)
+- **Thread reply** → continues the active thread
+- **Old thread reply** → auto-starts new thread with context summary
+- **`/compact` or `/clear`** → Claude calls `new_thread` to start fresh
+- **Resume** → continues the existing thread (persisted to disk)
 
 ## Access control
 
@@ -99,12 +114,12 @@ Only the Slack user ID in `ALLOWED_SLACK_USER_ID` can:
 - Send messages that reach Claude
 - Approve or deny tool-use prompts via Slack buttons
 
-Messages from any other Slack user are silently dropped. Button clicks from other users are ignored even if they somehow see the message.
+Messages from any other Slack user are silently dropped. Button clicks from other users are ignored.
 
 ## Limitations
 
 - Personal use only (one allowed user ID)
-- No pairing flow — you must set the user ID manually in `.env`
+- Single Claude Code session at a time (Socket Mode round-robins events across connections)
 - No file attachment support yet
 - Requires `--dangerously-load-development-channels` flag (research preview)
 - Permission relay requires Claude Code v2.1.81+

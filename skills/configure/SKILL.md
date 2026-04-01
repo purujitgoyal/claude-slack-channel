@@ -1,5 +1,5 @@
 ---
-description: Set up Slack channel tokens. Writes SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and ALLOWED_SLACK_USER_ID to ~/.claude/channels/slack/.env.
+description: Set up Slack channel tokens. Writes SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ALLOWED_SLACK_USER_ID, and SLACK_CHANNEL_ID to ~/.claude/channels/slack/.env.
 ---
 
 # /slack:configure
@@ -16,14 +16,14 @@ Check if `~/.claude/channels/slack/.env` exists. If it does, read and display
 the variable names with masked values (show first 10 chars + `...`). Ask if the
 user wants to overwrite.
 
-### 2. Collect the three values
+### 2. Collect the four values
 
 Ask for each value if not already provided in $ARGUMENTS:
 
 **`SLACK_BOT_TOKEN`**
 - Starts with `xoxb-`
 - Found at: Slack App dashboard → OAuth & Permissions → Bot User OAuth Token
-- The app needs these bot token scopes: `chat:write`, `reactions:write`, `im:history`, `im:read`
+- The app needs these bot token scopes: `chat:write`, `reactions:write`, `groups:history`
 
 **`SLACK_APP_TOKEN`**
 - Starts with `xapp-`
@@ -35,8 +35,15 @@ Ask for each value if not already provided in $ARGUMENTS:
 - Format: `U01XXXXXXXX`
 - Found in Slack: click your profile picture → View Profile → three-dot menu (⋯) → Copy member ID
 
-Also remind the user that **Interactivity & Shortcuts** must be enabled in the
-Slack App dashboard (no Request URL needed — Socket Mode handles delivery).
+**`SLACK_CHANNEL_ID`**
+- Format: `C01XXXXXXXX`
+- The ID of the private channel where the bot operates (e.g. `#purujit-cc`)
+- Found in Slack: right-click the channel → View channel details → scroll to bottom → Channel ID
+- The bot must be invited to this channel after app installation
+
+Also remind the user:
+- **Event Subscriptions** must include: `app_mention`, `message.groups`
+- **Interactivity & Shortcuts** must be enabled (no Request URL needed — Socket Mode handles it)
 
 ### 3. Write the config file
 
@@ -52,6 +59,7 @@ Write `~/.claude/channels/slack/.env`:
 SLACK_BOT_TOKEN=<value>
 SLACK_APP_TOKEN=<value>
 ALLOWED_SLACK_USER_ID=<value>
+SLACK_CHANNEL_ID=<value>
 ```
 
 Then lock permissions:
@@ -74,5 +82,5 @@ Tell the user:
 > claude --dangerously-load-development-channels server:slack
 > ```
 >
-> Send yourself a DM in Slack to test — Claude will receive it and can reply back.
-> When Claude needs tool approval, you'll see an Allow/Deny message in your DM.
+> @mention the bot in your channel to start a conversation.
+> Permission prompts appear as Allow/Deny buttons in the active thread.

@@ -77,10 +77,6 @@ function saveSession(state: SessionState) {
 
 let activeThreadTs: string | null = null
 
-// Load persisted session (supports resume)
-const savedSession = loadSession()
-activeThreadTs = savedSession.threadTs
-
 // ---------------------------------------------------------------------------
 // MCP server
 // ---------------------------------------------------------------------------
@@ -91,11 +87,11 @@ You are connected to the user's Slack workspace via a channel bridge in #purujit
 Inbound messages arrive as:
   <channel source="slack" slack_user_id="U01..." channel_id="C01..." event_ts="...">message text</channel>
 
-REPLY BEHAVIOR:
-- Use the reply tool to send messages. You can both respond to inbound messages AND initiate new threads proactively.
-- Keep replies concise — the user reads these on mobile.
-- All replies are automatically threaded — one Claude Code session = one Slack thread.
-- You do NOT need a channel_id — the server routes to the configured channel automatically.
+TOOLS:
+- reply: Respond within the active thread. Use for replying to user messages and ongoing conversation.
+- new_thread: Start a fresh thread. Use to proactively reach the user (status updates, questions, alerts),
+  or after /compact or /clear. Pass text to post the first message immediately.
+- Keep messages concise — the user reads these on mobile.
 
 THREAD LIFECYCLE:
 - The user @mentions the bot in #purujit-cc to start a new thread.
@@ -108,6 +104,11 @@ THREAD LIFECYCLE:
 PERMISSION RELAY:
 - When Claude Code shows a tool-approval dialog, the server automatically forwards it
   to the active thread as Block Kit buttons (Allow/Deny). You do NOT need to handle this.
+
+IMPORTANT — TOOL ROUTING:
+- ALWAYS use the reply and new_thread tools from this server (slack-channel) to send messages.
+- NEVER use the official Slack plugin tools (slack_send_message, slack_send_message_draft, etc.) to send messages.
+- The official Slack plugin tools (slack_read_channel, slack_read_thread) are fine for READING context.
 
 This channel is primarily used in multi-repo coordination sessions — the user
 may be away from the terminal and relying on Slack to monitor progress and
@@ -212,10 +213,15 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'new_thread',
       description:
-        'Start a fresh Slack thread. Call this after /compact or /clear to keep conversations organized. The next reply will become the new thread parent.',
+        'Start a fresh Slack thread. Use to proactively reach the user, or after /compact or /clear. If text is provided, it becomes the first message (thread parent). Otherwise the next reply starts the thread.',
       inputSchema: {
         type: 'object' as const,
-        properties: {},
+        properties: {
+          text: {
+            type: 'string',
+            description: 'Optional first message for the new thread. If omitted, the thread starts on the next reply.',
+          },
+        },
       },
     },
   ],
@@ -234,6 +240,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'new_thread') {
     activeThreadTs = null
     saveSession({ threadTs: null })
+
+    const { text } = (req.params.arguments ?? {}) as { text?: string }
+    if (text) {
+      await postThreaded({ text })
+      console.error('[slack-channel] new thread started with message')
+      return { content: [{ type: 'text' as const, text: 'New thread started.' }] }
+    }
+
     console.error('[slack-channel] thread reset — next reply starts a new thread')
     return {
       content: [
@@ -341,6 +355,8 @@ bolt.message(async ({ message }) => {
 
   // Top-level message (no thread) — ignore, only @mentions start threads
   if (!threadTs) return
+
+  console.error(`[slack-channel] DEBUG thread check: msg.thread_ts=${threadTs} activeThreadTs=${activeThreadTs}`)
 
   // Active thread reply — forward directly
   if (threadTs === activeThreadTs) {
@@ -476,6 +492,9 @@ process.on('SIGINT', () => process.exit(0))
 process.on('SIGTERM', () => process.exit(0))
 
 process.stdin.on('close', () => {
+  // Clear session so the next fresh session doesn't reuse an old thread.
+  // Resume sessions will start a new thread via @mention or new_thread.
+  saveSession({ threadTs: null })
   bolt.stop().finally(() => process.exit(0))
 })
 

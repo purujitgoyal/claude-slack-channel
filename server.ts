@@ -92,9 +92,10 @@ Inbound messages arrive as:
   <channel source="slack" slack_user_id="U01..." channel_id="C01..." event_ts="...">message text</channel>
 
 REPLY BEHAVIOR:
-- Always reply using the reply tool.
+- Use the reply tool to send messages. You can both respond to inbound messages AND initiate new threads proactively.
 - Keep replies concise — the user reads these on mobile.
 - All replies are automatically threaded — one Claude Code session = one Slack thread.
+- You do NOT need a channel_id — the server routes to the configured channel automatically.
 
 THREAD LIFECYCLE:
 - The user @mentions the bot in #purujit-cc to start a new thread.
@@ -200,17 +201,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object' as const,
         properties: {
-          channel_id: {
-            type: 'string',
-            description:
-              'The Slack channel ID from the inbound <channel> tag. (Used for interface consistency; the server routes to the configured channel.)',
-          },
           text: {
             type: 'string',
             description: 'The message text. Plain text or Slack mrkdwn.',
           },
         },
-        required: ['channel_id', 'text'],
+        required: ['text'],
       },
     },
     {
@@ -228,7 +224,6 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'reply') {
     const { text } = req.params.arguments as {
-      channel_id: string
       text: string
     }
     // Always post to the configured channel, ignore passed channel_id

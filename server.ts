@@ -337,7 +337,7 @@ bolt.message(async ({ message }) => {
   console.error(`[slack-channel] forwarded DM from ${msg.user} to Claude`)
 })
 
-// App mention — starts a new thread, resets the previous one
+// App mention — forward to Claude (same as DM, but strip the @mention tag)
 bolt.event('app_mention', async ({ event }) => {
   if (event.user !== ALLOWED_USER_ID) {
     console.error(
@@ -353,15 +353,10 @@ bolt.event('app_mention', async ({ event }) => {
 
   activeDmChannelId = channelId
 
-  // Reset thread — next reply starts a new one
-  activeThreadTs = null
-  saveSession({ threadTs: null, channelId: activeDmChannelId })
-  console.error('[slack-channel] app_mention received — thread reset')
-
   await mcp.notification({
     method: 'notifications/claude/channel',
     params: {
-      content: text || '(new session)',
+      content: text || '(ping)',
       meta: {
         slack_user_id: event.user ?? '',
         channel_id: channelId,

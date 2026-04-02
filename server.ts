@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { App } from '@slack/bolt'
@@ -7,6 +7,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
+import { dlopen, suffix } from 'bun:ffi'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,36 +36,31 @@ function stripMentions(text: string): string {
 const CHANNELS_DIR = join(homedir(), '.claude', 'channels', 'slack')
 const ENV_PATH = join(CHANNELS_DIR, '.env')
 const SESSION_PATH = join(CHANNELS_DIR, 'session.json')
-const PID_PATH = join(CHANNELS_DIR, 'server.pid')
+const LOCK_PATH = join(CHANNELS_DIR, 'server.lock')
 
 function ensureChannelsDir(): void {
   if (!existsSync(CHANNELS_DIR)) mkdirSync(CHANNELS_DIR, { recursive: true })
 }
 
-// Kill stale server process if one exists
-try {
-  if (existsSync(PID_PATH)) {
-    const oldPid = parseInt(readFileSync(PID_PATH, 'utf8').trim(), 10)
-    if (oldPid && oldPid !== process.pid) {
-      try {
-        process.kill(oldPid)
-        log(`killed stale process ${oldPid}`)
-      } catch {
-        // process already dead
-      }
-    }
-  }
-} catch {
-  // ignore
+// Acquire exclusive file lock — only one instance can run at a time.
+// Uses flock(2) via Bun FFI. The OS releases the lock automatically on crash.
+ensureChannelsDir()
+const lockFd = openSync(LOCK_PATH, 'w')
+
+const LOCK_EX = 2
+const LOCK_NB = 4
+const libc = dlopen(`libc.${suffix}`, {
+  flock: { args: ['i32', 'i32'], returns: 'i32' },
+})
+
+if (libc.symbols.flock(lockFd, LOCK_EX | LOCK_NB) !== 0) {
+  log('another instance is already running — exiting')
+  closeSync(lockFd)
+  process.exit(0)
 }
 
-// Write our PID
-try {
-  ensureChannelsDir()
-  writeFileSync(PID_PATH, String(process.pid), 'utf8')
-} catch {
-  // non-fatal
-}
+// Write PID for diagnostics (lock is the real guard)
+writeFileSync(LOCK_PATH, String(process.pid), 'utf8')
 
 function loadEnv(path: string): Record<string, string> {
   if (!existsSync(path)) {
@@ -563,7 +559,7 @@ bolt.action(/^(allow|deny)_[a-km-z]{5}$/, async ({ action, ack, body, client }) 
 
 function cleanup() {
   saveSession({ threadTs: null })
-  try { unlinkSync(PID_PATH) } catch {}
+  try { closeSync(lockFd) } catch {}
 }
 
 process.on('SIGINT', () => { cleanup(); process.exit(0) })

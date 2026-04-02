@@ -9,6 +9,26 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { z } from 'zod'
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const LOG_PREFIX = '[slack-channel]'
+
+function log(message: string): void {
+  console.error(`${LOG_PREFIX} ${message}`)
+}
+
+function textResult(text: string) {
+  return { content: [{ type: 'text' as const, text }] }
+}
+
+const MENTION_RE = /<@[A-Z0-9]+>\s*/g
+
+function stripMentions(text: string): string {
+  return text.replace(MENTION_RE, '').trim()
+}
+
+// ---------------------------------------------------------------------------
 // Config loading
 // ---------------------------------------------------------------------------
 
@@ -17,6 +37,10 @@ const ENV_PATH = join(CHANNELS_DIR, '.env')
 const SESSION_PATH = join(CHANNELS_DIR, 'session.json')
 const PID_PATH = join(CHANNELS_DIR, 'server.pid')
 
+function ensureChannelsDir(): void {
+  if (!existsSync(CHANNELS_DIR)) mkdirSync(CHANNELS_DIR, { recursive: true })
+}
+
 // Kill stale server process if one exists
 try {
   if (existsSync(PID_PATH)) {
@@ -24,9 +48,9 @@ try {
     if (oldPid && oldPid !== process.pid) {
       try {
         process.kill(oldPid)
-        console.error(`[slack-channel] killed stale process ${oldPid}`)
+        log(`killed stale process ${oldPid}`)
       } catch {
-        // process already dead — fine
+        // process already dead
       }
     }
   }
@@ -36,7 +60,7 @@ try {
 
 // Write our PID
 try {
-  if (!existsSync(CHANNELS_DIR)) mkdirSync(CHANNELS_DIR, { recursive: true })
+  ensureChannelsDir()
   writeFileSync(PID_PATH, String(process.pid), 'utf8')
 } catch {
   // non-fatal
@@ -94,10 +118,10 @@ function loadSession(): SessionState {
 
 function saveSession(state: SessionState) {
   try {
-    if (!existsSync(CHANNELS_DIR)) mkdirSync(CHANNELS_DIR, { recursive: true })
+    ensureChannelsDir()
     writeFileSync(SESSION_PATH, JSON.stringify(state), 'utf8')
   } catch (err) {
-    console.error('[slack-channel] failed to save session state:', err)
+    log(`failed to save session state: ${err}`)
   }
 }
 
@@ -200,7 +224,7 @@ async function fetchThreadSummary(threadTs: string): Promise<string> {
 
     for (const msg of messages) {
       const who = msg.bot_id ? 'bot' : 'user'
-      const text = (msg.text ?? '').replace(/<@[A-Z0-9]+>\s*/g, '').trim()
+      const text = stripMentions(msg.text ?? '')
       if (!text) continue
       const line = `[${who}]: ${text}`
       if (totalLen + line.length > 2000) {
@@ -213,7 +237,7 @@ async function fetchThreadSummary(threadTs: string): Promise<string> {
 
     return lines.join('\n')
   } catch (err) {
-    console.error('[slack-channel] failed to fetch thread summary:', err)
+    log(`failed to fetch thread summary: ${err}`)
     return '(could not fetch previous thread history)'
   }
 }
@@ -280,7 +304,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
     // Always post to the configured channel, ignore passed channel_id
     await postThreaded({ text })
-    return { content: [{ type: 'text' as const, text: 'sent' }] }
+    return textResult('sent')
   }
 
   if (req.params.name === 'react') {
@@ -293,7 +317,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       name: emoji,
       timestamp: event_ts,
     })
-    return { content: [{ type: 'text' as const, text: 'reacted' }] }
+    return textResult('reacted')
   }
 
   if (req.params.name === 'new_thread') {
@@ -303,16 +327,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { text } = (req.params.arguments ?? {}) as { text?: string }
     if (text) {
       await postThreaded({ text })
-      console.error('[slack-channel] new thread started with message')
-      return { content: [{ type: 'text' as const, text: 'New thread started.' }] }
+      log('new thread started with message')
+      return textResult('New thread started.')
     }
 
-    console.error('[slack-channel] thread reset — next reply starts a new thread')
-    return {
-      content: [
-        { type: 'text' as const, text: 'Thread reset. Next reply will start a new thread.' },
-      ],
-    }
+    log('thread reset — next reply starts a new thread')
+    return textResult('Thread reset. Next reply will start a new thread.')
   }
 
   throw new Error(`unknown tool: ${req.params.name}`)
@@ -377,9 +397,7 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
       },
     ],
   })
-  console.error(
-    `[slack-channel] permission request ${request_id} (${tool_name}) sent to Slack`,
-  )
+  log(`permission request ${request_id} (${tool_name}) sent to Slack`)
 })
 
 // ---------------------------------------------------------------------------
@@ -428,12 +446,12 @@ bolt.message(async ({ message }) => {
         },
       },
     })
-    console.error(`[slack-channel] forwarded thread reply to Claude`)
+    log('forwarded thread reply to Claude')
     return
   }
 
   // Old thread reply — fetch summary, start new thread, forward with context
-  console.error(`[slack-channel] reply in old thread ${threadTs} — fetching summary`)
+  log(`reply in old thread ${threadTs} — fetching summary`)
   const summary = await fetchThreadSummary(threadTs)
 
   // Post a note in the old thread
@@ -459,7 +477,7 @@ bolt.message(async ({ message }) => {
       },
     },
   })
-  console.error(`[slack-channel] forwarded old thread reply with summary to Claude`)
+  log('forwarded old thread reply with summary to Claude')
 })
 
 // App mention — starts a new thread
@@ -467,13 +485,13 @@ bolt.event('app_mention', async ({ event }) => {
   if (event.user !== ALLOWED_USER_ID) return
 
   // Strip the bot mention tag (e.g. "<@U0123ABC> hello" → "hello")
-  const text = (event.text ?? '').replace(/<@[A-Z0-9]+>\s*/g, '').trim()
+  const text = stripMentions(event.text ?? '')
   const eventTs = event.ts ?? ''
 
   // The @mention message becomes the thread parent
   activeThreadTs = eventTs
   saveSession({ threadTs: activeThreadTs })
-  console.error(`[slack-channel] app_mention — new thread rooted at ${eventTs}`)
+  log(`app_mention — new thread rooted at ${eventTs}`)
 
   await mcp.notification({
     method: 'notifications/claude/channel',
@@ -486,7 +504,7 @@ bolt.event('app_mention', async ({ event }) => {
       },
     },
   })
-  console.error(`[slack-channel] forwarded app_mention to Claude`)
+  log('forwarded app_mention to Claude')
 })
 
 // Permission relay — receive verdict from Allow/Deny button click
@@ -508,9 +526,7 @@ bolt.action(/^(allow|deny)_[a-km-z]{5}$/, async ({ action, ack, body, client }) 
     method: 'notifications/claude/channel/permission',
     params: { request_id, behavior },
   })
-  console.error(
-    `[slack-channel] verdict ${behavior} for request ${request_id}`,
-  )
+  log(`verdict ${behavior} for request ${request_id}`)
 
   // Update the Slack message — replace buttons with outcome text
   const message = body.message as { ts?: string } | undefined
@@ -559,7 +575,7 @@ process.stdin.on('close', () => {
 })
 
 await bolt.start()
-console.error('[slack-channel] Bolt Socket Mode connected')
+log('Bolt Socket Mode connected')
 
 await mcp.connect(new StdioServerTransport())
-console.error('[slack-channel] MCP connected — channel: ' + SLACK_CHANNEL_ID)
+log(`MCP connected — channel: ${SLACK_CHANNEL_ID}`)

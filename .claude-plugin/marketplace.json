@@ -8,11 +8,7 @@
     {
       "name": "slack",
       "description": "Slack channel for Claude Code — two-way DM bridge with permission relay via Block Kit buttons.",
-      "source": {
-        "source": "url",
-        "url": "https://github.com/purujitgoyal/claude-slack-channel.git",
-        "sha": "7519b0dc649b36c9d5f23501c2b1a1b992bf7c50"
-      },
+      "source": "./",
       "category": "productivity",
       "homepage": "https://github.com/purujitgoyal/claude-slack-channel"
     }

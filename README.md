@@ -85,13 +85,27 @@ This guides you through writing the `.env` file.
 
 ## Start
 
-```bash
-claude --dangerously-load-development-channels server:slack
+Add the server to your project's `.mcp.json` with `SLACK_CHANNEL_ACTIVATE=1` to enable it:
+
+```json
+{
+  "mcpServers": {
+    "slack-channel": {
+      "command": "bun",
+      "args": ["run", "--cwd", "/path/to/claude-slack-channel", "--shell=bun", "--silent", "start"],
+      "env": { "SLACK_CHANNEL_ACTIVATE": "1" }
+    }
+  }
+}
 ```
 
-Claude Code reads `.mcp.json`, spawns `server.ts` as a subprocess, and connects via MCP. The server stays dormant until it detects channel support in the client capabilities, then acquires the file lock, loads tokens, and connects Bolt to Slack via Socket Mode.
+Then start Claude Code:
 
-Without the flag, the server runs but exposes zero tools — no context token cost.
+```bash
+claude --dangerously-load-development-channels server:slack-channel
+```
+
+Without `SLACK_CHANNEL_ACTIVATE=1`, the server stays dormant — tools are listed but inactive, no Slack connection is made.
 
 > **Note:** The `--dangerously-load-development-channels` flag is required during the research preview because this plugin isn't on Anthropic's approved allowlist yet.
 

@@ -147,7 +147,7 @@ approve tool use.
 `.trim();
 
 const mcp = new Server(
-  { name: 'slack', version: '0.3.0' },
+  { name: 'slack-channel', version: '0.3.0' },
   {
     capabilities: {
       experimental: {
@@ -220,11 +220,12 @@ async function activate(): Promise<void> {
 mcp.oninitialized = () => {
   const caps = mcp.getClientCapabilities();
   const hasChannel = caps?.experimental?.['claude/channel'] != null;
-  if (!hasChannel) {
+  const envActivate = process.env.SLACK_CHANNEL_ACTIVATE === '1';
+  if (!hasChannel && !envActivate) {
     log('channel not requested by client — staying dormant');
     return;
   }
-  log('client supports claude/channel — activating');
+  log(`activating (channel=${hasChannel}, env=${envActivate})`);
   activate().catch((err) => {
     log(`activation failed: ${err}`);
   });
@@ -350,7 +351,7 @@ const TOOLS = [
 ];
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: channelActive ? TOOLS : [],
+  tools: TOOLS,
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {

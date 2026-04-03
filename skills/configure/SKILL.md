@@ -1,4 +1,5 @@
 ---
+name: configure
 description: Set up Slack channel tokens. Writes SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ALLOWED_SLACK_USER_ID, and SLACK_CHANNEL_ID to ~/.claude/channels/slack/.env.
 ---
 
@@ -37,7 +38,7 @@ Ask for each value if not already provided in $ARGUMENTS:
 
 **`SLACK_CHANNEL_ID`**
 - Format: `C01XXXXXXXX`
-- The ID of the private channel where the bot operates (e.g. `#purujit-cc`)
+- The ID of the private channel where the bot operates
 - Found in Slack: right-click the channel → View channel details → scroll to bottom → Channel ID
 - The bot must be invited to this channel after app installation
 
@@ -76,11 +77,22 @@ Re-read the file and display each variable name with its value masked
 
 Tell the user:
 
-> Configuration saved. Start a Claude Code session with the Slack channel using:
+> Configuration saved. To activate the channel, add the env var `SLACK_CHANNEL_ACTIVATE=1`
+> to the server's entry in your project's `.mcp.json`:
 >
-> ```bash
-> claude --dangerously-load-development-channels server:slack
+> ```json
+> {
+>   "mcpServers": {
+>     "slack-channel": {
+>       "command": "bun",
+>       "args": ["run", "--cwd", "/path/to/claude-slack-channel", "--shell=bun", "--silent", "start"],
+>       "env": { "SLACK_CHANNEL_ACTIVATE": "1" }
+>     }
+>   }
+> }
 > ```
+>
+> Then start with: `claude --dangerously-load-development-channels server:slack-channel`
 >
 > @mention the bot in your channel to start a conversation.
 > Permission prompts appear as Allow/Deny buttons in the active thread.

@@ -142,7 +142,7 @@ approve tool use.
 `.trim();
 
 const mcp = new Server(
-  { name: 'slack', version: '0.1.0' },
+  { name: 'slack', version: '0.2.0' },
   {
     capabilities: {
       experimental: {

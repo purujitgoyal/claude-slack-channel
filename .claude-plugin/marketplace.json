@@ -1,5 +1,4 @@
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "claude-slack-channel",
   "description": "Two-way Slack channel bridge for Claude Code with permission relay via Block Kit buttons.",
   "owner": {

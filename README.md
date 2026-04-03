@@ -5,6 +5,8 @@ A Claude Code channel plugin that bridges a Slack channel to a Claude Code sessi
 - **Two-way**: @mention the bot, Claude replies in a thread
 - **Permission relay**: tool-use approval dialogs appear as Block Kit messages with Allow/Deny buttons — no need to watch the terminal
 - **Threaded**: one session = one thread. Old thread replies auto-start a new thread with context summary
+- **Lazy activation**: dormant with zero context cost until `--dangerously-load-development-channels` is used — safe to install as a plugin without overhead
+- **Single-instance guard**: uses `flock(2)` to ensure only one session owns the Slack channel at a time
 - **Personal use**: only your Slack user ID can trigger messages or approve tool calls
 
 Primary use case: multi-repo autonomous sessions where you want to monitor progress and approve tool use from your phone without being at the machine.
@@ -87,9 +89,13 @@ This guides you through writing the `.env` file.
 claude --dangerously-load-development-channels server:slack
 ```
 
-Claude Code reads `.mcp.json`, spawns `server.ts` as a subprocess, and connects Bolt to Slack via Socket Mode.
+Claude Code reads `.mcp.json`, spawns `server.ts` as a subprocess, and connects via MCP. The server stays dormant until it detects channel support in the client capabilities, then acquires the file lock, loads tokens, and connects Bolt to Slack via Socket Mode.
+
+Without the flag, the server runs but exposes zero tools — no context token cost.
 
 > **Note:** The `--dangerously-load-development-channels` flag is required during the research preview because this plugin isn't on Anthropic's approved allowlist yet.
+
+If another session already holds the lock, activation fails with a clear error message.
 
 ## Using it
 
@@ -116,10 +122,19 @@ Only the Slack user ID in `ALLOWED_SLACK_USER_ID` can:
 
 Messages from any other Slack user are silently dropped. Button clicks from other users are ignored.
 
+## Development
+
+```bash
+bun run check   # lint + format check
+bun run fix     # auto-fix lint + format issues
+```
+
+Uses [Biome](https://biomejs.dev) for linting and formatting.
+
 ## Limitations
 
 - Personal use only (one allowed user ID)
-- Single Claude Code session at a time (Socket Mode round-robins events across connections)
+- Single Claude Code session at a time (enforced by `flock(2)` — second session gets a clear error)
 - No file attachment support yet
 - Requires `--dangerously-load-development-channels` flag (research preview)
 - Permission relay requires Claude Code v2.1.81+

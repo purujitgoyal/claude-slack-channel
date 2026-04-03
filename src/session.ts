@@ -1,5 +1,5 @@
 import { writeFileSync } from 'node:fs';
-import { SESSION_PATH, ensureChannelsDir, log } from './config.ts';
+import { ensureChannelsDir, log, SESSION_PATH } from './config.ts';
 
 // ---------------------------------------------------------------------------
 // Session persistence

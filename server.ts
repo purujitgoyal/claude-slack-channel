@@ -1,10 +1,15 @@
 #!/usr/bin/env bun
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { log, loadEnv, ENV_PATH } from './src/config.ts';
-import { saveSession, setActiveThreadTs } from './src/session.ts';
+import { ENV_PATH, loadEnv, log } from './src/config.ts';
 import { acquireLock, releaseLock } from './src/lock.ts';
-import { mcp, setSlackBridge, setChannelActive, isChannelActive } from './src/mcp.ts';
-import { startSlack, stopSlack, postThreaded } from './src/slack.ts';
+import {
+  isChannelActive,
+  mcp,
+  setChannelActive,
+  setSlackBridge,
+} from './src/mcp.ts';
+import { saveSession, setActiveThreadTs } from './src/session.ts';
+import { postThreaded, startSlack, stopSlack } from './src/slack.ts';
 
 // ---------------------------------------------------------------------------
 // Lazy activation — only when client negotiates claude/channel support
@@ -29,12 +34,21 @@ async function activate(): Promise<void> {
   setActiveThreadTs(null);
   saveSession({ threadTs: null });
 
-  const app = await startSlack({ mcp, botToken, appToken, channelId, allowedUserId });
+  const app = await startSlack({
+    mcp,
+    botToken,
+    appToken,
+    channelId,
+    allowedUserId,
+    onDead: shutdownGracefully,
+  });
 
   setSlackBridge({
     postThreaded,
     addReaction: (ch, name, ts) =>
-      app.client.reactions.add({ channel: ch, name, timestamp: ts }).then(() => {}),
+      app.client.reactions
+        .add({ channel: ch, name, timestamp: ts })
+        .then(() => {}),
     channelId,
   });
 

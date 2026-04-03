@@ -14,7 +14,9 @@ export function log(message: string): void {
   console.error(`${LOG_PREFIX} ${message}`);
   if (DEBUG_LOG) {
     const line = `${new Date().toISOString()} ${LOG_PREFIX} ${message}\n`;
-    try { appendFileSync(`${CHANNELS_DIR}/debug.log`, line); } catch {}
+    try {
+      appendFileSync(`${CHANNELS_DIR}/debug.log`, line);
+    } catch {}
   }
 }
 

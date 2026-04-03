@@ -237,6 +237,82 @@ function registerBoltHandlers(mcp: Server) {
 }
 
 // ---------------------------------------------------------------------------
+// Connection monitoring — logs lifecycle events, notifies Claude, shuts down
+// on prolonged disconnect
+// ---------------------------------------------------------------------------
+
+const HEALTH_TIMEOUT = 120_000; // 2 minutes
+
+function monitorConnection(mcp: Server, cid: string, onDead: () => void): void {
+  // Access the underlying SocketModeClient from Bolt's receiver
+  const socketClient = (bolt!.receiver as any).client;
+  let healthTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  socketClient.on('disconnected', () => {
+    log('Socket Mode disconnected');
+    healthTimeout = setTimeout(async () => {
+      log('health-check timeout — connection dead, shutting down');
+      try {
+        await mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content:
+              'Slack connection dead — bridge shutting down. Restart with /mcp to reconnect. Do NOT fall back to Slack plugin tools (slack_send_message, etc.) — they bypass the channel bridge.',
+            meta: { channel_id: cid, event_ts: '' },
+          },
+        });
+      } catch {
+        // Best-effort notification before shutdown
+      }
+      onDead();
+    }, HEALTH_TIMEOUT);
+    healthTimeout.unref();
+
+    mcp
+      .notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content:
+            'Slack connection lost — attempting to reconnect. Messages sent during this time may not be delivered.',
+          meta: { channel_id: cid, event_ts: '' },
+        },
+      })
+      .catch(() => {});
+  });
+
+  socketClient.on('connected', () => {
+    log('Socket Mode connected');
+    if (healthTimeout) {
+      clearTimeout(healthTimeout);
+      healthTimeout = null;
+    }
+    mcp
+      .notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content:
+            'Slack connection restored. Messages during the outage may have been missed.',
+          meta: { channel_id: cid, event_ts: '' },
+        },
+      })
+      .catch(() => {});
+  });
+
+  socketClient.on('reconnecting', () => {
+    log('Socket Mode reconnecting');
+  });
+
+  socketClient.on('error', (err: Error) => {
+    log(`Socket Mode error: ${err.message}`);
+  });
+
+  socketClient.on('unable_to_socket_mode_start', () => {
+    log('unable_to_socket_mode_start — calling onDead');
+    onDead();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle — start / stop
 // ---------------------------------------------------------------------------
 
@@ -246,6 +322,7 @@ export async function startSlack(opts: {
   appToken: string;
   channelId: string;
   allowedUserId: string;
+  onDead: () => void;
 }): Promise<App> {
   channelId = opts.channelId;
   allowedUserId = opts.allowedUserId;
@@ -260,6 +337,8 @@ export async function startSlack(opts: {
   registerBoltHandlers(opts.mcp);
   await bolt.start();
   log('Bolt Socket Mode connected');
+
+  monitorConnection(opts.mcp, opts.channelId, opts.onDead);
 
   return bolt;
 }

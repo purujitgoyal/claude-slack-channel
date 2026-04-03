@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-slack-channel",
+  "description": "Two-way Slack channel bridge for Claude Code with permission relay via Block Kit buttons.",
+  "owner": {
+    "name": "purujitgoyal"
+  },
+  "plugins": [
+    {
+      "name": "slack",
+      "description": "Slack channel for Claude Code — two-way DM bridge with permission relay via Block Kit buttons.",
+      "source": ".",
+      "category": "productivity",
+      "homepage": "https://github.com/purujitgoyal/claude-slack-channel"
+    }
+  ]
+}

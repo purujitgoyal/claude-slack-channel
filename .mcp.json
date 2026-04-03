@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "slack": {
+    "slack-channel": {
       "command": "bun",
       "args": ["run", "--shell=bun", "--silent", "start"]
     }

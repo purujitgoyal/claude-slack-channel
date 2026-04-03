@@ -70,26 +70,17 @@ function loadEnv(path: string): Record<string, string> {
 }
 
 // ---------------------------------------------------------------------------
-// Session state — persisted to disk for resume support
+// Session state
+// ---------------------------------------------------------------------------
+// Each Claude Code session gets its own Slack thread. threadTs is persisted to
+// disk so that mid-session tools (reply, new_thread) can find the active thread
+// after an @mention or old-thread-reply changes it. On activation, any stale
+// threadTs from a prior crash is cleared — the authoritative reset lives in
+// activate(), not cleanup(), so it runs regardless of how the previous session
+// ended. cleanup() also clears it as a belt-and-suspenders measure.
 // ---------------------------------------------------------------------------
 
-type SessionState = {
-  threadTs: string | null;
-};
-
-function loadSession(): SessionState {
-  try {
-    if (existsSync(SESSION_PATH)) {
-      const data = JSON.parse(readFileSync(SESSION_PATH, 'utf8'));
-      return { threadTs: data.threadTs ?? null };
-    }
-  } catch {
-    // corrupt file — start fresh
-  }
-  return { threadTs: null };
-}
-
-function saveSession(state: SessionState) {
+function saveSession(state: { threadTs: string | null }) {
   try {
     ensureChannelsDir();
     writeFileSync(SESSION_PATH, JSON.stringify(state), 'utf8');
@@ -108,13 +99,14 @@ let lockFd: number | null = null;
 let bolt: App | null = null;
 let SLACK_CHANNEL_ID = '';
 let ALLOWED_USER_ID = '';
+const resolvedPermissions = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // MCP server — starts dormant (no tools) until channel mode is detected
 // ---------------------------------------------------------------------------
 
 const INSTRUCTIONS = `
-You are connected to the user's Slack workspace via a channel bridge in #purujit-cc.
+You are connected to the user's Slack workspace via a channel bridge.
 
 Inbound messages arrive as:
   <channel source="slack" slack_user_id="U01..." channel_id="C01..." event_ts="...">message text</channel>
@@ -128,12 +120,12 @@ TOOLS:
 - Keep messages concise — the user reads these on mobile.
 
 THREAD LIFECYCLE:
-- The user @mentions the bot in #purujit-cc to start a new thread.
+- The user @mentions the bot to start a new thread.
 - Replies in the active thread are forwarded to you.
 - If the user replies in an old thread, the server starts a new thread with a summary
   of the old thread's history, so you get that context automatically.
 - Call the new_thread tool after a /compact or /clear to start a fresh Slack thread.
-- On resume, the existing thread is continued automatically.
+- Each new session starts a fresh thread automatically.
 
 PERMISSION RELAY:
 - When Claude Code shows a tool-approval dialog, the server automatically forwards it
@@ -150,7 +142,7 @@ approve tool use.
 `.trim();
 
 const mcp = new Server(
-  { name: 'slack', version: '0.2.0' },
+  { name: 'slack', version: '0.1.0' },
   {
     capabilities: {
       experimental: {
@@ -200,8 +192,9 @@ async function activate(): Promise<void> {
   }
   writeFileSync(LOCK_PATH, String(process.pid), 'utf8');
 
-  // Restore session
-  activeThreadTs = loadSession().threadTs;
+  // Always start a fresh thread — clears stale threadTs left by a crash
+  activeThreadTs = null;
+  saveSession({ threadTs: null });
 
   // Start Bolt
   bolt = new App({
@@ -561,58 +554,58 @@ function registerBoltHandlers() {
   });
 
   // Permission relay — receive verdict from Allow/Deny button click
-  bolt!.action(
-    /^(allow|deny)_[a-km-z]{5}$/,
-    async ({ action, ack, body, client }) => {
-      await ack();
+  bolt!.action(/^(allow|deny)_.+$/, async ({ action, ack, body, client }) => {
+    await ack();
 
-      const actingUser = body.user?.id;
-      if (actingUser !== ALLOWED_USER_ID) return;
+    const actingUser = body.user?.id;
+    if (actingUser !== ALLOWED_USER_ID) return;
 
-      const btn = action as { value?: string };
-      const value = btn.value ?? '';
-      const colonIdx = value.indexOf(':');
-      if (colonIdx === -1) return;
+    const btn = action as { value?: string };
+    const value = btn.value ?? '';
+    const colonIdx = value.indexOf(':');
+    if (colonIdx === -1) return;
 
-      const behavior = value.slice(0, colonIdx) as 'allow' | 'deny';
-      const request_id = value.slice(colonIdx + 1);
+    const behavior = value.slice(0, colonIdx) as 'allow' | 'deny';
+    const request_id = value.slice(colonIdx + 1);
 
-      await mcp.notification({
-        method: 'notifications/claude/channel/permission',
-        params: { request_id, behavior },
-      });
-      log(`verdict ${behavior} for request ${request_id}`);
+    if (resolvedPermissions.has(request_id)) return;
+    resolvedPermissions.add(request_id);
 
-      // Update the Slack message — replace buttons with outcome text
-      const message = body.message as { ts?: string } | undefined;
-      const channelId =
-        (body.container as { channel_id?: string } | undefined)?.channel_id ??
-        SLACK_CHANNEL_ID;
+    await mcp.notification({
+      method: 'notifications/claude/channel/permission',
+      params: { request_id, behavior },
+    });
+    log(`verdict ${behavior} for request ${request_id}`);
 
-      if (message?.ts && channelId) {
-        await client.chat.update({
-          channel: channelId,
-          ts: message.ts,
-          text:
-            behavior === 'allow'
-              ? `Allowed — \`${request_id}\``
-              : `Denied — \`${request_id}\``,
-          blocks: [
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text:
-                  behavior === 'allow'
-                    ? `*Allowed* — request \`${request_id}\``
-                    : `*Denied* — request \`${request_id}\``,
-              },
+    // Update the Slack message — replace buttons with outcome text
+    const message = body.message as { ts?: string } | undefined;
+    const channelId =
+      (body.container as { channel_id?: string } | undefined)?.channel_id ??
+      SLACK_CHANNEL_ID;
+
+    if (message?.ts && channelId) {
+      await client.chat.update({
+        channel: channelId,
+        ts: message.ts,
+        text:
+          behavior === 'allow'
+            ? `Allowed — \`${request_id}\``
+            : `Denied — \`${request_id}\``,
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text:
+                behavior === 'allow'
+                  ? `*Allowed* — request \`${request_id}\``
+                  : `*Denied* — request \`${request_id}\``,
             },
-          ],
-        });
-      }
-    },
-  );
+          },
+        ],
+      });
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -627,20 +620,15 @@ function cleanup() {
     } catch {}
 }
 
-process.on('SIGINT', () => {
-  cleanup();
-  process.exit(0);
-});
-process.on('SIGTERM', () => {
-  cleanup();
-  process.exit(0);
-});
-
-process.stdin.on('close', () => {
+function shutdownGracefully() {
   cleanup();
   if (bolt) bolt.stop().finally(() => process.exit(0));
   else process.exit(0);
-});
+}
+
+process.on('SIGINT', shutdownGracefully);
+process.on('SIGTERM', shutdownGracefully);
+process.stdin.on('close', shutdownGracefully);
 
 await mcp.connect(new StdioServerTransport());
 log('MCP connected — waiting for channel activation');

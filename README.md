@@ -108,11 +108,11 @@ If another session already holds the lock, activation fails with a clear error m
 
 ### Thread lifecycle
 
+- **New session** → always starts a fresh thread (including `--resume` / `/resume`)
 - **@mention** → starts a new thread (resets the previous one)
 - **Thread reply** → continues the active thread
 - **Old thread reply** → auto-starts new thread with context summary
 - **`/compact` or `/clear`** → Claude calls `new_thread` to start fresh
-- **Resume** → continues the existing thread (persisted to disk)
 
 ## Access control
 

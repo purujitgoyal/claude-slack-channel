@@ -119,8 +119,13 @@ TOOLS:
   without a full reply. Pass the event_ts from the inbound <channel> tag.
 - Keep messages concise — the user reads these on mobile.
 
+GETTING STARTED:
+- When asked to "continue on Slack", "move to Slack", or similar — immediately call new_thread
+  with a brief summary of what you're working on. Do NOT ask the user to @mention first.
+- You can always proactively call new_thread to reach the user on Slack.
+
 THREAD LIFECYCLE:
-- The user @mentions the bot to start a new thread.
+- The user @mentions the bot to start a new thread, OR you call new_thread to start one.
 - Replies in the active thread are forwarded to you.
 - If the user replies in an old thread, the server starts a new thread with a summary
   of the old thread's history, so you get that context automatically.

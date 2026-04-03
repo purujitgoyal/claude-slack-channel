@@ -1,62 +1,72 @@
 #!/usr/bin/env bun
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
-import { App } from '@slack/bolt'
-import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { z } from 'zod'
-import { dlopen, suffix } from 'bun:ffi'
+import { dlopen, suffix } from 'bun:ffi';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
+import { App } from '@slack/bolt';
+import { z } from 'zod';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const LOG_PREFIX = '[slack-channel]'
+const LOG_PREFIX = '[slack-channel]';
 
 function log(message: string): void {
-  console.error(`${LOG_PREFIX} ${message}`)
+  console.error(`${LOG_PREFIX} ${message}`);
 }
 
 function textResult(text: string) {
-  return { content: [{ type: 'text' as const, text }] }
+  return { content: [{ type: 'text' as const, text }] };
 }
 
-const MENTION_RE = /<@[A-Z0-9]+>\s*/g
+const MENTION_RE = /<@[A-Z0-9]+>\s*/g;
 
 function stripMentions(text: string): string {
-  return text.replace(MENTION_RE, '').trim()
+  return text.replace(MENTION_RE, '').trim();
 }
 
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
 
-const CHANNELS_DIR = join(homedir(), '.claude', 'channels', 'slack')
-const ENV_PATH = join(CHANNELS_DIR, '.env')
-const SESSION_PATH = join(CHANNELS_DIR, 'session.json')
-const LOCK_PATH = join(CHANNELS_DIR, 'server.lock')
+const CHANNELS_DIR = join(homedir(), '.claude', 'channels', 'slack');
+const ENV_PATH = join(CHANNELS_DIR, '.env');
+const SESSION_PATH = join(CHANNELS_DIR, 'session.json');
+const LOCK_PATH = join(CHANNELS_DIR, 'server.lock');
 
 function ensureChannelsDir(): void {
-  if (!existsSync(CHANNELS_DIR)) mkdirSync(CHANNELS_DIR, { recursive: true })
+  if (!existsSync(CHANNELS_DIR)) mkdirSync(CHANNELS_DIR, { recursive: true });
 }
 
 function loadEnv(path: string): Record<string, string> {
   if (!existsSync(path)) {
     throw new Error(
       `Missing config: ${path}\nRun /slack:configure to set up tokens.`,
-    )
+    );
   }
-  const out: Record<string, string> = {}
+  const out: Record<string, string> = {};
   for (const line of readFileSync(path, 'utf8').split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const idx = trimmed.indexOf('=')
-    if (idx === -1) continue
-    out[trimmed.slice(0, idx)] = trimmed.slice(idx + 1)
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx === -1) continue;
+    out[trimmed.slice(0, idx)] = trimmed.slice(idx + 1);
   }
-  return out
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,27 +74,27 @@ function loadEnv(path: string): Record<string, string> {
 // ---------------------------------------------------------------------------
 
 type SessionState = {
-  threadTs: string | null
-}
+  threadTs: string | null;
+};
 
 function loadSession(): SessionState {
   try {
     if (existsSync(SESSION_PATH)) {
-      const data = JSON.parse(readFileSync(SESSION_PATH, 'utf8'))
-      return { threadTs: data.threadTs ?? null }
+      const data = JSON.parse(readFileSync(SESSION_PATH, 'utf8'));
+      return { threadTs: data.threadTs ?? null };
     }
   } catch {
     // corrupt file — start fresh
   }
-  return { threadTs: null }
+  return { threadTs: null };
 }
 
 function saveSession(state: SessionState) {
   try {
-    ensureChannelsDir()
-    writeFileSync(SESSION_PATH, JSON.stringify(state), 'utf8')
+    ensureChannelsDir();
+    writeFileSync(SESSION_PATH, JSON.stringify(state), 'utf8');
   } catch (err) {
-    log(`failed to save session state: ${err}`)
+    log(`failed to save session state: ${err}`);
   }
 }
 
@@ -92,12 +102,12 @@ function saveSession(state: SessionState) {
 // Shared state — populated by activate()
 // ---------------------------------------------------------------------------
 
-let channelActive = false
-let activeThreadTs: string | null = null
-let lockFd: number | null = null
-let bolt: App | null = null
-let SLACK_CHANNEL_ID = ''
-let ALLOWED_USER_ID = ''
+let channelActive = false;
+let activeThreadTs: string | null = null;
+let lockFd: number | null = null;
+let bolt: App | null = null;
+let SLACK_CHANNEL_ID = '';
+let ALLOWED_USER_ID = '';
 
 // ---------------------------------------------------------------------------
 // MCP server — starts dormant (no tools) until channel mode is detected
@@ -137,7 +147,7 @@ IMPORTANT — TOOL ROUTING:
 This channel is primarily used in multi-repo coordination sessions — the user
 may be away from the terminal and relying on Slack to monitor progress and
 approve tool use.
-`.trim()
+`.trim();
 
 const mcp = new Server(
   { name: 'slack', version: '0.2.0' },
@@ -151,7 +161,7 @@ const mcp = new Server(
     },
     instructions: INSTRUCTIONS,
   },
-)
+);
 
 // ---------------------------------------------------------------------------
 // Lazy activation — only when client negotiates claude/channel support
@@ -159,39 +169,39 @@ const mcp = new Server(
 
 async function activate(): Promise<void> {
   // Load config
-  const env = loadEnv(ENV_PATH)
-  const botToken = env['SLACK_BOT_TOKEN'] ?? ''
-  const appToken = env['SLACK_APP_TOKEN'] ?? ''
-  ALLOWED_USER_ID = env['ALLOWED_SLACK_USER_ID'] ?? ''
-  SLACK_CHANNEL_ID = env['SLACK_CHANNEL_ID'] ?? ''
+  const env = loadEnv(ENV_PATH);
+  const botToken = env.SLACK_BOT_TOKEN ?? '';
+  const appToken = env.SLACK_APP_TOKEN ?? '';
+  ALLOWED_USER_ID = env.ALLOWED_SLACK_USER_ID ?? '';
+  SLACK_CHANNEL_ID = env.SLACK_CHANNEL_ID ?? '';
 
   if (!botToken || !appToken || !ALLOWED_USER_ID || !SLACK_CHANNEL_ID) {
     throw new Error(
       'SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ALLOWED_SLACK_USER_ID, and SLACK_CHANNEL_ID must all be set in ' +
-      ENV_PATH,
-    )
+        ENV_PATH,
+    );
   }
 
   // Acquire exclusive file lock
-  ensureChannelsDir()
-  const LOCK_EX = 2
-  const LOCK_NB = 4
+  ensureChannelsDir();
+  const LOCK_EX = 2;
+  const LOCK_NB = 4;
   const libc = dlopen(`libc.${suffix}`, {
     flock: { args: ['i32', 'i32'], returns: 'i32' },
-  })
+  });
 
-  lockFd = openSync(LOCK_PATH, 'w')
+  lockFd = openSync(LOCK_PATH, 'w');
   if (libc.symbols.flock(lockFd, LOCK_EX | LOCK_NB) !== 0) {
-    closeSync(lockFd)
-    lockFd = null
+    closeSync(lockFd);
+    lockFd = null;
     throw new Error(
       'Another slack-channel instance is already running. Only one session can use the Slack channel at a time.',
-    )
+    );
   }
-  writeFileSync(LOCK_PATH, String(process.pid), 'utf8')
+  writeFileSync(LOCK_PATH, String(process.pid), 'utf8');
 
   // Restore session
-  activeThreadTs = loadSession().threadTs
+  activeThreadTs = loadSession().threadTs;
 
   // Start Bolt
   bolt = new App({
@@ -199,52 +209,52 @@ async function activate(): Promise<void> {
     appToken: appToken,
     socketMode: true,
     logLevel: 'error' as const,
-  })
-  registerBoltHandlers()
-  await bolt.start()
-  log('Bolt Socket Mode connected')
+  });
+  registerBoltHandlers();
+  await bolt.start();
+  log('Bolt Socket Mode connected');
 
-  channelActive = true
-  await mcp.sendToolListChanged()
-  log(`channel activated — ${SLACK_CHANNEL_ID}`)
+  channelActive = true;
+  await mcp.sendToolListChanged();
+  log(`channel activated — ${SLACK_CHANNEL_ID}`);
 }
 
 mcp.oninitialized = () => {
-  const caps = mcp.getClientCapabilities()
-  const hasChannel = caps?.experimental?.['claude/channel'] != null
+  const caps = mcp.getClientCapabilities();
+  const hasChannel = caps?.experimental?.['claude/channel'] != null;
   if (!hasChannel) {
-    log('channel not requested by client — staying dormant')
-    return
+    log('channel not requested by client — staying dormant');
+    return;
   }
-  log('client supports claude/channel — activating')
+  log('client supports claude/channel — activating');
   activate().catch((err) => {
-    log(`activation failed: ${err}`)
-  })
-}
+    log(`activation failed: ${err}`);
+  });
+};
 
 // ---------------------------------------------------------------------------
 // Threading helper — posts a message, starting or continuing a thread
 // ---------------------------------------------------------------------------
 
 async function postThreaded(opts: {
-  text: string
-  blocks?: any[]
+  text: string;
+  blocks?: any[];
 }): Promise<string | undefined> {
   const result = await bolt!.client.chat.postMessage({
     channel: SLACK_CHANNEL_ID,
     text: opts.text,
     blocks: opts.blocks,
     thread_ts: activeThreadTs ?? undefined,
-  })
+  });
 
   // If this is the first message (no active thread), the response ts becomes
   // the thread parent. All subsequent messages reply to it.
   if (!activeThreadTs && result.ts) {
-    activeThreadTs = result.ts
-    saveSession({ threadTs: activeThreadTs })
+    activeThreadTs = result.ts;
+    saveSession({ threadTs: activeThreadTs });
   }
 
-  return result.ts
+  return result.ts;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,29 +267,29 @@ async function fetchThreadSummary(threadTs: string): Promise<string> {
       channel: SLACK_CHANNEL_ID,
       ts: threadTs,
       limit: 50,
-    })
+    });
 
-    const messages = result.messages ?? []
-    const lines: string[] = []
-    let totalLen = 0
+    const messages = result.messages ?? [];
+    const lines: string[] = [];
+    let totalLen = 0;
 
     for (const msg of messages) {
-      const who = msg.bot_id ? 'bot' : 'user'
-      const text = stripMentions(msg.text ?? '')
-      if (!text) continue
-      const line = `[${who}]: ${text}`
+      const who = msg.bot_id ? 'bot' : 'user';
+      const text = stripMentions(msg.text ?? '');
+      if (!text) continue;
+      const line = `[${who}]: ${text}`;
       if (totalLen + line.length > 2000) {
-        lines.push('... (truncated)')
-        break
+        lines.push('... (truncated)');
+        break;
       }
-      lines.push(line)
-      totalLen += line.length
+      lines.push(line);
+      totalLen += line.length;
     }
 
-    return lines.join('\n')
+    return lines.join('\n');
   } catch (err) {
-    log(`failed to fetch thread summary: ${err}`)
-    return '(could not fetch previous thread history)'
+    log(`failed to fetch thread summary: ${err}`);
+    return '(could not fetch previous thread history)';
   }
 }
 
@@ -290,7 +300,8 @@ async function fetchThreadSummary(threadTs: string): Promise<string> {
 const TOOLS = [
   {
     name: 'reply',
-    description: 'Send a message back to the user in the Slack channel. Messages are automatically threaded.',
+    description:
+      'Send a message back to the user in the Slack channel. Messages are automatically threaded.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -311,74 +322,78 @@ const TOOLS = [
       properties: {
         text: {
           type: 'string',
-          description: 'Optional first message for the new thread. If omitted, the thread starts on the next reply.',
+          description:
+            'Optional first message for the new thread. If omitted, the thread starts on the next reply.',
         },
       },
     },
   },
   {
     name: 'react',
-    description: 'Add an emoji reaction to a message. Use to acknowledge a message without a full reply (e.g. checkmark, eyes, thumbsup).',
+    description:
+      'Add an emoji reaction to a message. Use to acknowledge a message without a full reply (e.g. checkmark, eyes, thumbsup).',
     inputSchema: {
       type: 'object' as const,
       properties: {
         emoji: {
           type: 'string',
-          description: 'Emoji name without colons (e.g. "white_check_mark", "eyes", "thumbsup", "rocket").',
+          description:
+            'Emoji name without colons (e.g. "white_check_mark", "eyes", "thumbsup", "rocket").',
         },
         event_ts: {
           type: 'string',
-          description: 'The event_ts from the inbound <channel> tag of the message to react to.',
+          description:
+            'The event_ts from the inbound <channel> tag of the message to react to.',
         },
       },
       required: ['emoji', 'event_ts'],
     },
   },
-]
+];
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: channelActive ? TOOLS : [],
-}))
+}));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
-  if (!channelActive) throw new Error('slack channel is not active')
+  if (!channelActive) throw new Error('slack channel is not active');
 
   if (req.params.name === 'reply') {
-    const { text } = req.params.arguments as { text: string }
-    await postThreaded({ text })
-    return textResult('sent')
+    const { text } = req.params.arguments as { text: string };
+    await postThreaded({ text });
+    return textResult('sent');
   }
 
   if (req.params.name === 'react') {
     const { emoji, event_ts } = req.params.arguments as {
-      emoji: string
-      event_ts: string
-    }
+      emoji: string;
+      event_ts: string;
+    };
     await bolt!.client.reactions.add({
       channel: SLACK_CHANNEL_ID,
       name: emoji,
       timestamp: event_ts,
-    })
-    return textResult('reacted')
+    });
+    return textResult('reacted');
   }
 
   if (req.params.name === 'new_thread') {
-    activeThreadTs = null
-    saveSession({ threadTs: null })
+    activeThreadTs = null;
+    saveSession({ threadTs: null });
 
-    const { text } = (req.params.arguments ?? {}) as { text?: string }
+    const { text } = (req.params.arguments ?? {}) as { text?: string };
     if (text) {
-      await postThreaded({ text })
-      log('new thread started with message')
-      return textResult('New thread started.')
+      await postThreaded({ text });
+      log('new thread started with message');
+      return textResult('New thread started.');
     }
 
-    log('thread reset — next reply starts a new thread')
-    return textResult('Thread reset. Next reply will start a new thread.')
+    log('thread reset — next reply starts a new thread');
+    return textResult('Thread reset. Next reply will start a new thread.');
   }
 
-  throw new Error(`unknown tool: ${req.params.name}`)
-})
+  throw new Error(`unknown tool: ${req.params.name}`);
+});
 
 // ---------------------------------------------------------------------------
 // Permission relay — receive request from Claude Code, send to Slack
@@ -392,12 +407,14 @@ const PermissionRequestSchema = z.object({
     description: z.string(),
     input_preview: z.string(),
   }),
-})
+});
 
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
-  const { request_id, tool_name, description, input_preview } = params
+  const { request_id, tool_name, description, input_preview } = params;
   const preview =
-    input_preview.length > 200 ? input_preview.slice(0, 197) + '...' : input_preview
+    input_preview.length > 200
+      ? `${input_preview.slice(0, 197)}...`
+      : input_preview;
 
   await postThreaded({
     text: `Claude wants to use \`${tool_name}\` — tap Allow or Deny`,
@@ -438,9 +455,9 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
         ],
       },
     ],
-  })
-  log(`permission request ${request_id} (${tool_name}) sent to Slack`)
-})
+  });
+  log(`permission request ${request_id} (${tool_name}) sent to Slack`);
+});
 
 // ---------------------------------------------------------------------------
 // Bolt handlers — registered on the App instance during activate()
@@ -449,25 +466,25 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
 function registerBoltHandlers() {
   // Inbound channel messages — only forward active thread replies
   bolt!.message(async ({ message }) => {
-    if (message.subtype !== undefined) return
+    if (message.subtype !== undefined) return;
 
     const msg = message as {
-      user?: string
-      text?: string
-      channel?: string
-      ts?: string
-      thread_ts?: string
-    }
+      user?: string;
+      text?: string;
+      channel?: string;
+      ts?: string;
+      thread_ts?: string;
+    };
 
     // Sender gate
-    if (msg.user !== ALLOWED_USER_ID) return
+    if (msg.user !== ALLOWED_USER_ID) return;
 
-    const threadTs = msg.thread_ts
-    const text = msg.text ?? ''
-    const eventTs = msg.ts ?? ''
+    const threadTs = msg.thread_ts;
+    const text = msg.text ?? '';
+    const eventTs = msg.ts ?? '';
 
     // Top-level message (no thread) — ignore, only @mentions start threads
-    if (!threadTs) return
+    if (!threadTs) return;
 
     // Active thread reply — forward directly
     if (threadTs === activeThreadTs) {
@@ -481,25 +498,25 @@ function registerBoltHandlers() {
             event_ts: eventTs,
           },
         },
-      })
-      log('forwarded thread reply to Claude')
-      return
+      });
+      log('forwarded thread reply to Claude');
+      return;
     }
 
     // Old thread reply — fetch summary, start new thread, forward with context
-    log(`reply in old thread ${threadTs} — fetching summary`)
-    const summary = await fetchThreadSummary(threadTs)
+    log(`reply in old thread ${threadTs} — fetching summary`);
+    const summary = await fetchThreadSummary(threadTs);
 
     // Post a note in the old thread
     await bolt!.client.chat.postMessage({
       channel: SLACK_CHANNEL_ID,
       thread_ts: threadTs,
       text: '→ Continued in new thread',
-    })
+    });
 
     // Reset active thread — next postThreaded call will create a new one
-    activeThreadTs = null
-    saveSession({ threadTs: null })
+    activeThreadTs = null;
+    saveSession({ threadTs: null });
 
     // Forward to Claude with old thread context
     await mcp.notification({
@@ -512,22 +529,22 @@ function registerBoltHandlers() {
           event_ts: eventTs,
         },
       },
-    })
-    log('forwarded old thread reply with summary to Claude')
-  })
+    });
+    log('forwarded old thread reply with summary to Claude');
+  });
 
   // App mention — starts a new thread
   bolt!.event('app_mention', async ({ event }) => {
-    if (event.user !== ALLOWED_USER_ID) return
+    if (event.user !== ALLOWED_USER_ID) return;
 
     // Strip the bot mention tag (e.g. "<@U0123ABC> hello" → "hello")
-    const text = stripMentions(event.text ?? '')
-    const eventTs = event.ts ?? ''
+    const text = stripMentions(event.text ?? '');
+    const eventTs = event.ts ?? '';
 
     // The @mention message becomes the thread parent
-    activeThreadTs = eventTs
-    saveSession({ threadTs: activeThreadTs })
-    log(`app_mention — new thread rooted at ${eventTs}`)
+    activeThreadTs = eventTs;
+    saveSession({ threadTs: activeThreadTs });
+    log(`app_mention — new thread rooted at ${eventTs}`);
 
     await mcp.notification({
       method: 'notifications/claude/channel',
@@ -539,59 +556,63 @@ function registerBoltHandlers() {
           event_ts: eventTs,
         },
       },
-    })
-    log('forwarded app_mention to Claude')
-  })
+    });
+    log('forwarded app_mention to Claude');
+  });
 
   // Permission relay — receive verdict from Allow/Deny button click
-  bolt!.action(/^(allow|deny)_[a-km-z]{5}$/, async ({ action, ack, body, client }) => {
-    await ack()
+  bolt!.action(
+    /^(allow|deny)_[a-km-z]{5}$/,
+    async ({ action, ack, body, client }) => {
+      await ack();
 
-    const actingUser = body.user?.id
-    if (actingUser !== ALLOWED_USER_ID) return
+      const actingUser = body.user?.id;
+      if (actingUser !== ALLOWED_USER_ID) return;
 
-    const btn = action as { value?: string }
-    const value = btn.value ?? ''
-    const colonIdx = value.indexOf(':')
-    if (colonIdx === -1) return
+      const btn = action as { value?: string };
+      const value = btn.value ?? '';
+      const colonIdx = value.indexOf(':');
+      if (colonIdx === -1) return;
 
-    const behavior = value.slice(0, colonIdx) as 'allow' | 'deny'
-    const request_id = value.slice(colonIdx + 1)
+      const behavior = value.slice(0, colonIdx) as 'allow' | 'deny';
+      const request_id = value.slice(colonIdx + 1);
 
-    await mcp.notification({
-      method: 'notifications/claude/channel/permission',
-      params: { request_id, behavior },
-    })
-    log(`verdict ${behavior} for request ${request_id}`)
+      await mcp.notification({
+        method: 'notifications/claude/channel/permission',
+        params: { request_id, behavior },
+      });
+      log(`verdict ${behavior} for request ${request_id}`);
 
-    // Update the Slack message — replace buttons with outcome text
-    const message = body.message as { ts?: string } | undefined
-    const channelId =
-      (body.container as { channel_id?: string } | undefined)?.channel_id ?? SLACK_CHANNEL_ID
+      // Update the Slack message — replace buttons with outcome text
+      const message = body.message as { ts?: string } | undefined;
+      const channelId =
+        (body.container as { channel_id?: string } | undefined)?.channel_id ??
+        SLACK_CHANNEL_ID;
 
-    if (message?.ts && channelId) {
-      await client.chat.update({
-        channel: channelId,
-        ts: message.ts,
-        text:
-          behavior === 'allow'
-            ? `Allowed — \`${request_id}\``
-            : `Denied — \`${request_id}\``,
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text:
-                behavior === 'allow'
-                  ? '*Allowed* — request `' + request_id + '`'
-                  : '*Denied* — request `' + request_id + '`',
+      if (message?.ts && channelId) {
+        await client.chat.update({
+          channel: channelId,
+          ts: message.ts,
+          text:
+            behavior === 'allow'
+              ? `Allowed — \`${request_id}\``
+              : `Denied — \`${request_id}\``,
+          blocks: [
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text:
+                  behavior === 'allow'
+                    ? `*Allowed* — request \`${request_id}\``
+                    : `*Denied* — request \`${request_id}\``,
+              },
             },
-          },
-        ],
-      })
-    }
-  })
+          ],
+        });
+      }
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -599,18 +620,27 @@ function registerBoltHandlers() {
 // ---------------------------------------------------------------------------
 
 function cleanup() {
-  if (channelActive) saveSession({ threadTs: null })
-  if (lockFd != null) try { closeSync(lockFd) } catch {}
+  if (channelActive) saveSession({ threadTs: null });
+  if (lockFd != null)
+    try {
+      closeSync(lockFd);
+    } catch {}
 }
 
-process.on('SIGINT', () => { cleanup(); process.exit(0) })
-process.on('SIGTERM', () => { cleanup(); process.exit(0) })
+process.on('SIGINT', () => {
+  cleanup();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  cleanup();
+  process.exit(0);
+});
 
 process.stdin.on('close', () => {
-  cleanup()
-  if (bolt) bolt.stop().finally(() => process.exit(0))
-  else process.exit(0)
-})
+  cleanup();
+  if (bolt) bolt.stop().finally(() => process.exit(0));
+  else process.exit(0);
+});
 
-await mcp.connect(new StdioServerTransport())
-log('MCP connected — waiting for channel activation')
+await mcp.connect(new StdioServerTransport());
+log('MCP connected — waiting for channel activation');

@@ -1,5 +1,5 @@
 {
-  "name": "slack",
+  "name": "slack-channel",
   "description": "Slack channel for Claude Code — two-way DM bridge with permission relay via Block Kit buttons. Send messages to Claude and approve/deny tool-use prompts from Slack.",
   "version": "0.3.0",
   "author": {

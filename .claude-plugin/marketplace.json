@@ -6,7 +6,7 @@
   },
   "plugins": [
     {
-      "name": "slack",
+      "name": "slack-channel",
       "description": "Slack channel for Claude Code — two-way DM bridge with permission relay via Block Kit buttons.",
       "source": "./",
       "category": "productivity",

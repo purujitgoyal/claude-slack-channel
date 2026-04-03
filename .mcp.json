@@ -3,7 +3,7 @@
     "slack-channel": {
       "command": "bun",
       "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"],
-      "env": { "SLACK_CHANNEL_ACTIVATE": "0" }
+      "env": {}
     }
   }
 }

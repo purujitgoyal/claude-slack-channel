@@ -77,22 +77,20 @@ Re-read the file and display each variable name with its value masked
 
 Tell the user:
 
-> Configuration saved. To activate the channel, add the env var `SLACK_CHANNEL_ACTIVATE=1`
-> to the server's entry in your project's `.mcp.json`:
+> Configuration saved. To activate the channel:
 >
-> ```json
-> {
->   "mcpServers": {
->     "slack-channel": {
->       "command": "bun",
->       "args": ["run", "--cwd", "/path/to/claude-slack-channel", "--shell=bun", "--silent", "start"],
->       "env": { "SLACK_CHANNEL_ACTIVATE": "1" }
->     }
->   }
-> }
-> ```
+> 1. Add `SLACK_CHANNEL_ACTIVATE=1` to your Claude Code settings env
+>    (`~/.claude/settings.json` or `.claude/settings.local.json`):
 >
-> Then start with: `claude --dangerously-load-development-channels server:slack-channel`
+>    ```json
+>    { "env": { "SLACK_CHANNEL_ACTIVATE": "1" } }
+>    ```
+>
+> 2. Start Claude Code with inbound messages enabled:
+>
+>    ```bash
+>    claude --dangerously-load-development-channels plugin:slack-channel@claude-slack-channel
+>    ```
 >
 > @mention the bot in your channel to start a conversation.
 > Permission prompts appear as Allow/Deny buttons in the active thread.

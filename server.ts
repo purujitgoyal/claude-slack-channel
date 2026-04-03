@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { dlopen, suffix } from 'bun:ffi';
 import {
+  appendFileSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -25,8 +26,14 @@ import { z } from 'zod';
 
 const LOG_PREFIX = '[slack-channel]';
 
+const DEBUG_LOG = process.env.SLACK_CHANNEL_DEBUG === '1';
+
 function log(message: string): void {
   console.error(`${LOG_PREFIX} ${message}`);
+  if (DEBUG_LOG) {
+    const line = `${new Date().toISOString()} ${LOG_PREFIX} ${message}\n`;
+    try { appendFileSync(`${CHANNELS_DIR}/debug.log`, line); } catch {}
+  }
 }
 
 function textResult(text: string) {
@@ -147,7 +154,7 @@ approve tool use.
 `.trim();
 
 const mcp = new Server(
-  { name: 'slack-channel', version: '0.3.0' },
+  { name: 'slack-channel', version: '0.4.0' },
   {
     capabilities: {
       experimental: {
@@ -222,7 +229,7 @@ mcp.oninitialized = () => {
   const hasChannel = caps?.experimental?.['claude/channel'] != null;
   const envActivate = process.env.SLACK_CHANNEL_ACTIVATE === '1';
   if (!hasChannel && !envActivate) {
-    log('channel not requested by client — staying dormant');
+    log('channel not requested — staying dormant');
     return;
   }
   log(`activating (channel=${hasChannel}, env=${envActivate})`);

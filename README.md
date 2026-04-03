@@ -5,7 +5,7 @@ A Claude Code channel plugin that bridges a Slack channel to a Claude Code sessi
 - **Two-way**: @mention the bot, Claude replies in a thread
 - **Permission relay**: tool-use approval dialogs appear as Block Kit messages with Allow/Deny buttons — no need to watch the terminal
 - **Threaded**: one session = one thread. Old thread replies auto-start a new thread with context summary
-- **Lazy activation**: dormant with zero context cost until `--dangerously-load-development-channels` is used — safe to install as a plugin without overhead
+- **Lazy activation**: dormant by default — set `SLACK_CHANNEL_ACTIVATE=1` in your Claude Code `settings.json` env to enable
 - **Single-instance guard**: uses `flock(2)` to ensure only one session owns the Slack channel at a time
 - **Personal use**: only your Slack user ID can trigger messages or approve tool calls
 
@@ -45,7 +45,7 @@ Go to [api.slack.com/apps](https://api.slack.com/apps) → Create New App → Fr
 - Copy the Bot User OAuth Token — save as `SLACK_BOT_TOKEN` (starts with `xoxb-`)
 
 **Channel setup**
-- Create a private channel (e.g. `#purujit-cc`)
+- Create a private channel (e.g. `#claude-code`)
 - Invite the bot to the channel
 - Get the Channel ID: right-click channel → View channel details → scroll to bottom
 
@@ -85,36 +85,42 @@ This guides you through writing the `.env` file.
 
 ## Start
 
-Add the server to your project's `.mcp.json` with `SLACK_CHANNEL_ACTIVATE=1` to enable it:
+### 1. Activate the server
+
+Add `SLACK_CHANNEL_ACTIVATE=1` to your Claude Code `settings.json` env (either `~/.claude/settings.json` for global, or `.claude/settings.local.json` for per-project):
 
 ```json
 {
-  "mcpServers": {
-    "slack-channel": {
-      "command": "bun",
-      "args": ["run", "--cwd", "/path/to/claude-slack-channel", "--shell=bun", "--silent", "start"],
-      "env": { "SLACK_CHANNEL_ACTIVATE": "1" }
-    }
+  "env": {
+    "SLACK_CHANNEL_ACTIVATE": "1"
   }
 }
 ```
 
-Then start Claude Code:
+Without this, the server stays dormant — tools are listed but inactive, no Slack connection is made.
+
+### 2. Enable inbound messages
+
+Start Claude Code with the `--dangerously-load-development-channels` flag to allow Slack messages to reach Claude:
 
 ```bash
+# If installed as a marketplace plugin:
+claude --dangerously-load-development-channels plugin:slack-channel@claude-slack-channel
+
+# If using a project .mcp.json:
 claude --dangerously-load-development-channels server:slack-channel
 ```
 
-Without `SLACK_CHANNEL_ACTIVATE=1`, the server stays dormant — tools are listed but inactive, no Slack connection is made.
+Without this flag, outbound tools (reply, new_thread, react) still work, but inbound messages from Slack are ignored.
 
-> **Note:** The `--dangerously-load-development-channels` flag is required during the research preview because this plugin isn't on Anthropic's approved allowlist yet.
+> **Note:** This flag is required during the research preview because this plugin isn't on Anthropic's approved allowlist yet.
 
 If another session already holds the lock, activation fails with a clear error message.
 
 ## Using it
 
-1. Start Claude Code with the flag above
-2. @mention the bot in your channel (e.g. `@Claude Code Dev - Purujit check on the workers`)
+1. Start Claude Code with the flag and env var above
+2. @mention the bot in your channel (e.g. `@Claude Code Bot check on the workers`)
 3. Claude receives the message and replies in a new thread
 4. Reply in the thread to continue the conversation
 5. When Claude needs tool approval, you'll see Allow/Deny buttons in the thread
@@ -150,5 +156,6 @@ Uses [Biome](https://biomejs.dev) for linting and formatting.
 - Personal use only (one allowed user ID)
 - Single Claude Code session at a time (enforced by `flock(2)` — second session gets a clear error)
 - No file attachment support yet
-- Requires `--dangerously-load-development-channels` flag (research preview)
+- Inbound messages require `--dangerously-load-development-channels` flag (research preview)
 - Permission relay requires Claude Code v2.1.81+
+- Set `SLACK_CHANNEL_DEBUG=1` in env to enable debug file logging to `~/.claude/channels/slack/debug.log`

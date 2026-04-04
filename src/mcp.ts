@@ -5,7 +5,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { log, textResult } from './config.ts';
-import { saveSession, setActiveThreadTs } from './session.ts';
+import { pendingPermissions, saveSession, setActiveThreadTs } from './session.ts';
 
 // ---------------------------------------------------------------------------
 // SlackBridge — injected by server.ts to avoid circular deps with slack.ts
@@ -92,7 +92,7 @@ approve tool use.
 `.trim();
 
 export const mcp = new Server(
-  { name: 'slack-channel', version: '0.5.0' },
+  { name: 'slack-channel', version: '0.6.0' },
   {
     capabilities: {
       experimental: {
@@ -266,5 +266,6 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
       },
     ],
   });
+  pendingPermissions.set(request_id, { tool_name, description, input_preview: preview });
   log(`permission request ${request_id} (${tool_name}) sent to Slack`);
 });

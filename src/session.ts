@@ -44,3 +44,12 @@ export function setActiveThreadTs(ts: string | null): void {
 // ---------------------------------------------------------------------------
 
 export const resolvedPermissions = new Set<string>();
+
+// ---------------------------------------------------------------------------
+// Pending permission details — populated on request, consumed on verdict
+// ---------------------------------------------------------------------------
+
+export const pendingPermissions = new Map<
+  string,
+  { tool_name: string; description: string; input_preview: string }
+>();

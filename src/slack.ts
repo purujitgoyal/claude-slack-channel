@@ -3,10 +3,41 @@ import { App } from '@slack/bolt';
 import { log, stripMentions } from './config.ts';
 import {
   getActiveThreadTs,
+  pendingPermissions,
   resolvedPermissions,
   saveSession,
   setActiveThreadTs,
 } from './session.ts';
+
+// ---------------------------------------------------------------------------
+// Format raw JSON input_preview into a readable one-liner for confirmations
+// ---------------------------------------------------------------------------
+
+function formatInputPreview(toolName: string, raw: string): string {
+  try {
+    const obj = JSON.parse(raw);
+    switch (toolName) {
+      case 'Bash':
+        return obj.command ?? raw;
+      case 'Write':
+      case 'Read':
+      case 'Glob':
+        return obj.file_path ?? obj.pattern ?? raw;
+      case 'Edit':
+        return obj.file_path ?? raw;
+      case 'Grep':
+        return obj.pattern ? `/${obj.pattern}/` : raw;
+      default:
+        // For unknown tools, show first string value as a hint
+        for (const v of Object.values(obj)) {
+          if (typeof v === 'string' && v.length > 0) return v.slice(0, 120);
+        }
+        return raw;
+    }
+  } catch {
+    return raw;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Module state — populated by startSlack()
@@ -15,6 +46,7 @@ import {
 let bolt: App | null = null;
 let channelId = '';
 let allowedUserId = '';
+let cleanupMonitor: (() => void) | null = null;
 
 // ---------------------------------------------------------------------------
 // Threading helper — posts a message, starting or continuing a thread
@@ -199,10 +231,19 @@ function registerBoltHandlers(mcp: Server) {
     if (resolvedPermissions.has(request_id)) return;
     resolvedPermissions.add(request_id);
 
-    await mcp.notification({
-      method: 'notifications/claude/channel/permission',
-      params: { request_id, behavior },
-    });
+    try {
+      await mcp.notification({
+        method: 'notifications/claude/channel/permission',
+        params: { request_id, behavior },
+      });
+    } catch (err) {
+      resolvedPermissions.delete(request_id);
+      log(`failed to send verdict for ${request_id}: ${err}`);
+      return;
+    }
+
+    const details = pendingPermissions.get(request_id);
+    pendingPermissions.delete(request_id);
     log(`verdict ${behavior} for request ${request_id}`);
 
     // Update the Slack message — replace buttons with outcome text
@@ -211,23 +252,23 @@ function registerBoltHandlers(mcp: Server) {
       (body.container as { channel_id?: string } | undefined)?.channel_id ??
       channelId;
 
+    const label = behavior === 'allow' ? 'Allowed' : 'Denied';
+    const snippet = details
+      ? `\`${details.tool_name}\` \`\`\`${formatInputPreview(details.tool_name, details.input_preview)}\`\`\``
+          .slice(0, 150)
+      : `request \`${request_id}\``;
+
     if (message?.ts && msgChannelId) {
       await client.chat.update({
         channel: msgChannelId,
         ts: message.ts,
-        text:
-          behavior === 'allow'
-            ? `Allowed \u2014 \`${request_id}\``
-            : `Denied \u2014 \`${request_id}\``,
+        text: `${label} — ${snippet}`,
         blocks: [
           {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text:
-                behavior === 'allow'
-                  ? `*Allowed* \u2014 request \`${request_id}\``
-                  : `*Denied* \u2014 request \`${request_id}\``,
+              text: `*${label}* — ${snippet}`,
             },
           },
         ],
@@ -243,13 +284,21 @@ function registerBoltHandlers(mcp: Server) {
 
 const HEALTH_TIMEOUT = 120_000; // 2 minutes
 
-function monitorConnection(mcp: Server, cid: string, onDead: () => void): void {
+function monitorConnection(mcp: Server, cid: string, onDead: () => void): () => void {
   // Access the underlying SocketModeClient from Bolt's receiver
   const socketClient = (bolt!.receiver as any).client;
   let healthTimeout: ReturnType<typeof setTimeout> | null = null;
+  let connected = false;
+  let stopped = false;
+  let diagCloseListener: ((code: number, reason: Buffer) => void) | null = null;
 
   socketClient.on('disconnected', () => {
+    if (stopped) return;
     log('Socket Mode disconnected');
+    if (healthTimeout) {
+      clearTimeout(healthTimeout);
+      healthTimeout = null;
+    }
     healthTimeout = setTimeout(async () => {
       log('health-check timeout — connection dead, shutting down');
       try {
@@ -281,11 +330,31 @@ function monitorConnection(mcp: Server, cid: string, onDead: () => void): void {
   });
 
   socketClient.on('connected', () => {
+    if (stopped) return;
     log('Socket Mode connected');
     if (healthTimeout) {
       clearTimeout(healthTimeout);
       healthTimeout = null;
     }
+
+    // Attach WebSocket close listener for diagnostics — logs the close code
+    // and reason so we can determine what causes real-world drops.
+    // Only remove our own listener; leave the library's internal handlers intact.
+    const ws = socketClient.websocket;
+    if (ws) {
+      if (diagCloseListener) ws.off('close', diagCloseListener);
+      diagCloseListener = (code: number, reason: Buffer) => {
+        log(`ws closed: code=${code} reason=${reason?.toString() || '(none)'}`);
+      };
+      ws.on('close', diagCloseListener);
+    }
+
+    // Only notify on reconnections, not the initial connection.
+    if (!connected) {
+      connected = true;
+      return;
+    }
+
     mcp
       .notification({
         method: 'notifications/claude/channel',
@@ -310,6 +379,14 @@ function monitorConnection(mcp: Server, cid: string, onDead: () => void): void {
     log('unable_to_socket_mode_start — calling onDead');
     onDead();
   });
+
+  return () => {
+    stopped = true;
+    if (healthTimeout) {
+      clearTimeout(healthTimeout);
+      healthTimeout = null;
+    }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -338,14 +415,24 @@ export async function startSlack(opts: {
   await bolt.start();
   log('Bolt Socket Mode connected');
 
-  monitorConnection(opts.mcp, opts.channelId, opts.onDead);
+  cleanupMonitor = monitorConnection(opts.mcp, opts.channelId, opts.onDead);
 
   return bolt;
 }
 
 export async function stopSlack(): Promise<void> {
   if (bolt) {
-    await bolt.stop();
+    cleanupMonitor?.();
+    cleanupMonitor = null;
+    try {
+      await bolt.stop();
+    } catch (err: any) {
+      // @slack/socket-mode state machine bug: late WebSocket close event
+      // arrives after the client has already transitioned to 'disconnected',
+      // throwing "Unhandled event 'websocket close' in state 'disconnected'".
+      if (!err?.message?.includes('Unhandled event')) throw err;
+      log(`suppressed stop() error: ${err.message}`);
+    }
     bolt = null;
   }
 }

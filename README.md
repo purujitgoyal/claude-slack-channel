@@ -3,7 +3,8 @@
 A Claude Code channel plugin that bridges a Slack channel to a Claude Code session.
 
 - **Two-way**: @mention the bot, Claude replies in a thread
-- **Permission relay**: tool-use approval dialogs appear as Block Kit messages with Allow/Deny buttons — no need to watch the terminal
+- **Permission relay**: tool-use approval dialogs appear as Block Kit buttons with formatted confirmations (e.g. `Allowed — `Bash` ```git status```) — no need to watch the terminal
+- **Connection monitoring**: detects WebSocket drops, auto-reconnects, and shuts down after 2 minutes of dead connection so `/mcp` can restart cleanly
 - **Threaded**: one session = one thread. Old thread replies auto-start a new thread with context summary
 - **Lazy activation**: dormant by default — set `SLACK_CHANNEL_ACTIVATE=1` in your Claude Code `settings.json` env to enable
 - **Single-instance guard**: uses `flock(2)` to ensure only one session owns the Slack channel at a time
@@ -145,6 +146,7 @@ Messages from any other Slack user are silently dropped. Button clicks from othe
 ## Development
 
 ```bash
+bun test        # 115 unit tests
 bun run check   # lint + format check
 bun run fix     # auto-fix lint + format issues
 ```

@@ -5,7 +5,7 @@ A Claude Code channel plugin that bridges a Slack channel to a Claude Code sessi
 - **Two-way**: @mention the bot, Claude replies in a thread
 - **Permission relay**: tool-use approval dialogs appear as Block Kit buttons with formatted confirmations (e.g. `Allowed — `Bash` ```git status```) — no need to watch the terminal
 - **Connection monitoring**: detects WebSocket drops, auto-reconnects, and shuts down after 2 minutes of dead connection so `/mcp` can restart cleanly
-- **Threaded**: one session = one thread. Old thread replies auto-start a new thread with context summary
+- **Threaded**: one session = one thread. Reply in any old thread (even from a past session) to auto-start a new thread with context
 - **Lazy activation**: dormant by default — set `SLACK_CHANNEL_ACTIVATE=1` in your Claude Code `settings.json` env to enable
 - **Single-instance guard**: uses `flock(2)` to ensure only one session owns the Slack channel at a time
 - **Personal use**: only your Slack user ID can trigger messages or approve tool calls
@@ -132,8 +132,29 @@ If another session already holds the lock, activation fails with a clear error m
 - **New session** → always starts a fresh thread (including `--resume` / `/resume`)
 - **@mention** → starts a new thread (resets the previous one)
 - **Thread reply** → continues the active thread
-- **Old thread reply** → auto-starts new thread with context summary
+- **Old thread reply** → auto-starts new thread with context summary (see below)
 - **`/compact` or `/clear`** → Claude calls `new_thread` to start fresh
+
+### Cross-session context from old threads
+
+Reply in any old thread — even from a completely different session — and the plugin automatically:
+
+1. Fetches the old thread's history (up to 50 messages, 2000 chars)
+2. Posts a "→ Continued in new thread" breadcrumb in the old thread
+3. Starts a fresh thread with the old context + your new message
+
+Claude sees the conversation formatted as:
+
+```
+[Context from previous thread]
+[user]: what's the status on the auth migration?
+[bot]: The auth middleware has been replaced. Tests pass...
+
+[New message]
+actually, can you also update the session token format?
+```
+
+This works across sessions because it reads from Slack's API, not local state — so you can `--resume` a session, `/compact`, or start a completely new session, then reply in any historical thread to carry forward context. Useful for picking up where you left off without re-explaining what happened.
 
 ## Access control
 

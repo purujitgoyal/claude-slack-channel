@@ -283,12 +283,14 @@ function registerBoltHandlers(mcp: Server) {
 // ---------------------------------------------------------------------------
 
 const HEALTH_TIMEOUT = 120_000; // 2 minutes
-const RECONNECT_DEBOUNCE = 5_000; // 5 seconds — wait for connection to stabilize
+const OUTAGE_THRESHOLD = 10_000; // 10s — only notify if disconnect lasts longer than this
+const RECONNECT_DEBOUNCE = 5_000; // 5s — wait for connection to stabilize after reconnect
 
 function monitorConnection(mcp: Server, cid: string, onDead: () => void): () => void {
   // Access the underlying SocketModeClient from Bolt's receiver
   const socketClient = (bolt!.receiver as any).client;
   let healthTimeout: ReturnType<typeof setTimeout> | null = null;
+  let disconnectNotifyTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectNotifyTimer: ReturnType<typeof setTimeout> | null = null;
   let connected = false;
   let notifiedDisconnect = false;
@@ -327,19 +329,24 @@ function monitorConnection(mcp: Server, cid: string, onDead: () => void): () => 
     }, HEALTH_TIMEOUT);
     healthTimeout.unref();
 
-    // Only notify once per disconnect episode — avoid spam during flapping
-    if (!notifiedDisconnect) {
-      notifiedDisconnect = true;
-      mcp
-        .notification({
-          method: 'notifications/claude/channel',
-          params: {
-            content:
-              'Slack connection lost — attempting to reconnect. Messages sent during this time may not be delivered.',
-            meta: { channel_id: cid, event_ts: '' },
-          },
-        })
-        .catch(() => {});
+    // Delay the "lost" notification — routine Slack WS rotations reconnect in <5s
+    // and shouldn't be surfaced. Only notify if disconnect persists.
+    if (!notifiedDisconnect && !disconnectNotifyTimer) {
+      disconnectNotifyTimer = setTimeout(() => {
+        disconnectNotifyTimer = null;
+        notifiedDisconnect = true;
+        mcp
+          .notification({
+            method: 'notifications/claude/channel',
+            params: {
+              content:
+                'Slack connection lost — attempting to reconnect. Messages sent during this time may not be delivered.',
+              meta: { channel_id: cid, event_ts: '' },
+            },
+          })
+          .catch(() => {});
+      }, OUTAGE_THRESHOLD);
+      disconnectNotifyTimer.unref();
     }
   });
 
@@ -349,6 +356,12 @@ function monitorConnection(mcp: Server, cid: string, onDead: () => void): () => 
     if (healthTimeout) {
       clearTimeout(healthTimeout);
       healthTimeout = null;
+    }
+
+    // Cancel pending "lost" notification — reconnected before threshold
+    if (disconnectNotifyTimer) {
+      clearTimeout(disconnectNotifyTimer);
+      disconnectNotifyTimer = null;
     }
 
     // Attach WebSocket close listener for diagnostics — logs the close code
@@ -369,11 +382,14 @@ function monitorConnection(mcp: Server, cid: string, onDead: () => void): () => 
       return;
     }
 
+    // Only send "restored" if we actually notified about a disconnect
+    if (!notifiedDisconnect) return;
+
     // Debounce — wait for connection to stabilize before notifying Claude
     if (reconnectNotifyTimer) clearTimeout(reconnectNotifyTimer);
     reconnectNotifyTimer = setTimeout(() => {
       reconnectNotifyTimer = null;
-      notifiedDisconnect = false; // reset so next disconnect episode notifies
+      notifiedDisconnect = false;
       mcp
         .notification({
           method: 'notifications/claude/channel',
@@ -403,6 +419,10 @@ function monitorConnection(mcp: Server, cid: string, onDead: () => void): () => 
 
   return () => {
     stopped = true;
+    if (disconnectNotifyTimer) {
+      clearTimeout(disconnectNotifyTimer);
+      disconnectNotifyTimer = null;
+    }
     if (healthTimeout) {
       clearTimeout(healthTimeout);
       healthTimeout = null;

@@ -92,7 +92,7 @@ approve tool use.
 `.trim();
 
 export const mcp = new Server(
-  { name: 'slack-channel', version: '0.6.1' },
+  { name: 'slack-channel', version: '0.6.2' },
   {
     capabilities: {
       experimental: {

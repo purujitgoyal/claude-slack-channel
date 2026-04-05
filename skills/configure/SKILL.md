@@ -1,79 +1,86 @@
 ---
 name: configure
-description: Set up Slack channel tokens. Writes SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ALLOWED_SLACK_USER_ID, and SLACK_CHANNEL_ID to ~/.claude/channels/slack/.env.
+description: Guide the user through creating a Slack app and configuring the channel plugin end-to-end.
 ---
 
 # /slack:configure
 
-Guide the user through configuring the Slack channel plugin.
+Walk the user through the full setup of the Slack channel plugin — from creating the Slack app to writing the config file.
 
 Arguments: $ARGUMENTS
 
 ## Steps
 
-### 1. Check for existing config
+### 1. Create a Slack app
 
-Check if `~/.claude/channels/slack/.env` exists. If it does, read and display
-the variable names with masked values (show first 10 chars + `...`). Ask if the
-user wants to overwrite.
+If the user doesn't have a Slack app yet, guide them:
 
-### 2. Collect the four values
+1. Go to https://api.slack.com/apps → **Create New App** → **From scratch**
+2. Name it something personal (e.g. "Claude Code - yourname") — each user needs their own app
+3. Choose their workspace
 
-Ask for each value if not already provided in $ARGUMENTS:
+If they already have an app, skip to step 2.
 
-**`SLACK_BOT_TOKEN`**
-- Starts with `xoxb-`
-- Found at: Slack App dashboard → OAuth & Permissions → Bot User OAuth Token
-- The app needs these bot token scopes: `chat:write`, `reactions:write`, `groups:history`
+### 2. Configure the Slack app
 
-**`SLACK_APP_TOKEN`**
-- Starts with `xapp-`
-- Found at: Slack App dashboard → Basic Information → App-Level Tokens
-- Must have the `connections:write` scope
-- Required for Socket Mode (enable Socket Mode under Settings → Socket Mode)
+Walk them through each setting. Present this as a checklist they can follow in the Slack app dashboard:
 
-**`ALLOWED_SLACK_USER_ID`**
-- Format: `U01XXXXXXXX`
-- Found in Slack: click your profile picture → View Profile → three-dot menu (⋯) → Copy member ID
+**Socket Mode** (Settings → Socket Mode)
+- [ ] Enable Socket Mode
+- [ ] Generate an App-Level Token with scope `connections:write`
+- [ ] Copy the token — starts with `xapp-`
 
-**`SLACK_CHANNEL_ID`**
-- Format: `C01XXXXXXXX`
-- The ID of the private channel where the bot operates
-- Found in Slack: right-click the channel → View channel details → scroll to bottom → Channel ID
-- The bot must be invited to this channel after app installation
+**Bot Token Scopes** (Features → OAuth & Permissions → Scopes → Bot Token Scopes)
+- [ ] `chat:write` — send messages and update them
+- [ ] `reactions:write` — add emoji reactions
+- [ ] `groups:history` — read messages and threads in private channels
 
-Also remind the user:
-- **Event Subscriptions** must include: `app_mention`, `message.groups`
-- **Interactivity & Shortcuts** must be enabled (no Request URL needed — Socket Mode handles it)
+**Event Subscriptions** (Features → Event Subscriptions)
+- [ ] Enable Events
+- [ ] Subscribe to bot events: `app_mention`, `message.groups`
 
-### 3. Write the config file
+**Interactivity & Shortcuts** (Features → Interactivity & Shortcuts)
+- [ ] Enable Interactivity (no Request URL needed — Socket Mode handles it)
 
-Create the directory and write the file:
+**Install the app** (Settings → Install App)
+- [ ] Install to Workspace
+- [ ] Copy the **Bot User OAuth Token** — starts with `xoxb-`
+
+### 3. Channel and user setup
+
+- [ ] Create a private channel (e.g. `#claude-yourname`) or pick an existing one
+- [ ] Invite the bot to the channel: `/invite @Bot Name`
+- [ ] Get the **Channel ID**: right-click channel → View channel details → scroll to bottom
+- [ ] Get your **Slack User ID**: click your profile picture → View Profile → ⋯ → Copy member ID (format: `U01XXXXXXXX`)
+
+### 4. Write tokens
+
+Tell the user to create the config file themselves. Show them the template and commands:
 
 ```bash
 mkdir -p ~/.claude/channels/slack
 chmod 700 ~/.claude/channels/slack
 ```
 
-Write `~/.claude/channels/slack/.env`:
+Create `~/.claude/channels/slack/.env` with:
 ```
-SLACK_BOT_TOKEN=<value>
-SLACK_APP_TOKEN=<value>
-ALLOWED_SLACK_USER_ID=<value>
-SLACK_CHANNEL_ID=<value>
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+ALLOWED_SLACK_USER_ID=U...
+SLACK_CHANNEL_ID=C...
 ```
 
-Then lock permissions:
 ```bash
 chmod 600 ~/.claude/channels/slack/.env
 ```
 
-### 4. Confirm
+**Do NOT ask the user to paste tokens or read the .env file.** The user is responsible for writing the file. Once they confirm they've done it, check that the file exists (without reading its contents):
 
-Re-read the file and display each variable name with its value masked
-(first 10 chars + `...`). Confirm the file was written successfully.
+```bash
+test -f ~/.claude/channels/slack/.env && echo "Config file found" || echo "Config file not found"
+```
 
-### 5. Next step
+### 5. Activate
 
 Tell the user:
 
@@ -92,5 +99,5 @@ Tell the user:
 >    claude --dangerously-load-development-channels plugin:slack-channel@claude-slack-channel
 >    ```
 >
-> @mention the bot in your channel to start a conversation.
-> Permission prompts appear as Allow/Deny buttons in the active thread.
+> 3. @mention the bot in your channel to start a conversation.
+>    Permission prompts appear as Allow/Deny buttons in the active thread.

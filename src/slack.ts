@@ -283,18 +283,28 @@ function registerBoltHandlers(mcp: Server) {
 // ---------------------------------------------------------------------------
 
 const HEALTH_TIMEOUT = 120_000; // 2 minutes
+const RECONNECT_DEBOUNCE = 5_000; // 5 seconds — wait for connection to stabilize
 
 function monitorConnection(mcp: Server, cid: string, onDead: () => void): () => void {
   // Access the underlying SocketModeClient from Bolt's receiver
   const socketClient = (bolt!.receiver as any).client;
   let healthTimeout: ReturnType<typeof setTimeout> | null = null;
+  let reconnectNotifyTimer: ReturnType<typeof setTimeout> | null = null;
   let connected = false;
+  let notifiedDisconnect = false;
   let stopped = false;
   let diagCloseListener: ((code: number, reason: Buffer) => void) | null = null;
 
   socketClient.on('disconnected', () => {
     if (stopped) return;
     log('Socket Mode disconnected');
+
+    // Cancel any pending "restored" notification — connection didn't stabilize
+    if (reconnectNotifyTimer) {
+      clearTimeout(reconnectNotifyTimer);
+      reconnectNotifyTimer = null;
+    }
+
     if (healthTimeout) {
       clearTimeout(healthTimeout);
       healthTimeout = null;
@@ -317,16 +327,20 @@ function monitorConnection(mcp: Server, cid: string, onDead: () => void): () => 
     }, HEALTH_TIMEOUT);
     healthTimeout.unref();
 
-    mcp
-      .notification({
-        method: 'notifications/claude/channel',
-        params: {
-          content:
-            'Slack connection lost — attempting to reconnect. Messages sent during this time may not be delivered.',
-          meta: { channel_id: cid, event_ts: '' },
-        },
-      })
-      .catch(() => {});
+    // Only notify once per disconnect episode — avoid spam during flapping
+    if (!notifiedDisconnect) {
+      notifiedDisconnect = true;
+      mcp
+        .notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content:
+              'Slack connection lost — attempting to reconnect. Messages sent during this time may not be delivered.',
+            meta: { channel_id: cid, event_ts: '' },
+          },
+        })
+        .catch(() => {});
+    }
   });
 
   socketClient.on('connected', () => {
@@ -355,16 +369,23 @@ function monitorConnection(mcp: Server, cid: string, onDead: () => void): () => 
       return;
     }
 
-    mcp
-      .notification({
-        method: 'notifications/claude/channel',
-        params: {
-          content:
-            'Slack connection restored. Messages during the outage may have been missed.',
-          meta: { channel_id: cid, event_ts: '' },
-        },
-      })
-      .catch(() => {});
+    // Debounce — wait for connection to stabilize before notifying Claude
+    if (reconnectNotifyTimer) clearTimeout(reconnectNotifyTimer);
+    reconnectNotifyTimer = setTimeout(() => {
+      reconnectNotifyTimer = null;
+      notifiedDisconnect = false; // reset so next disconnect episode notifies
+      mcp
+        .notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content:
+              'Slack connection restored. Messages during the outage may have been missed.',
+            meta: { channel_id: cid, event_ts: '' },
+          },
+        })
+        .catch(() => {});
+    }, RECONNECT_DEBOUNCE);
+    reconnectNotifyTimer.unref();
   });
 
   socketClient.on('reconnecting', () => {
@@ -385,6 +406,10 @@ function monitorConnection(mcp: Server, cid: string, onDead: () => void): () => 
     if (healthTimeout) {
       clearTimeout(healthTimeout);
       healthTimeout = null;
+    }
+    if (reconnectNotifyTimer) {
+      clearTimeout(reconnectNotifyTimer);
+      reconnectNotifyTimer = null;
     }
   };
 }

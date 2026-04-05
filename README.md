@@ -18,9 +18,19 @@ Primary use case: multi-repo autonomous sessions where you want to monitor progr
 - A Slack workspace where you can create apps
 - Claude Code v2.1.81 or later (permission relay requires 2.1.81+)
 
-## Slack App setup
+## Setup
 
-Go to [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch.
+Each user needs their own Slack app. This takes ~5 minutes and gives you a fully isolated channel — your events, your bot, no interference with other users.
+
+> **Team use**: If multiple people on your team want to use this plugin, each person follows the steps below to create their own Slack app in the shared workspace. There is no shared app — Slack's Socket Mode delivers events to a single connection per app, so sharing an app between users would cause messages to be randomly lost.
+
+### 1. Create a Slack app
+
+Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**.
+
+Name it something personal (e.g. "Claude Code - yourname") so it's distinguishable from teammates' apps.
+
+### 2. Configure the app
 
 **Socket Mode** (Settings → Socket Mode)
 - Enable Socket Mode
@@ -34,29 +44,32 @@ Go to [api.slack.com/apps](https://api.slack.com/apps) → Create New App → Fr
 
 **Event Subscriptions** (Features → Event Subscriptions)
 - Enable Events
-- Under "Subscribe to bot events" add:
-  - `app_mention` — @mentions of the bot
-  - `message.groups` — messages in private channels (for thread replies)
+- Subscribe to bot events: `app_mention`, `message.groups`
 
 **Interactivity & Shortcuts** (Features → Interactivity & Shortcuts)
 - Enable Interactivity (no Request URL needed — Socket Mode handles delivery)
 
-**Install the app**
+### 3. Install and collect tokens
+
 - Settings → Install App → Install to Workspace
-- Copy the Bot User OAuth Token — save as `SLACK_BOT_TOKEN` (starts with `xoxb-`)
+- Copy the **Bot User OAuth Token** → `SLACK_BOT_TOKEN` (starts with `xoxb-`)
 
-**Channel setup**
-- Create a private channel (e.g. `#claude-code`)
-- Invite the bot to the channel
-- Get the Channel ID: right-click channel → View channel details → scroll to bottom
+### 4. Channel setup
 
-**Find your Slack user ID**
-- In Slack: click your profile picture → View Profile → ⋯ → Copy member ID
+- Create a private channel (e.g. `#claude-yourname`) or use an existing one
+- Invite your bot to the channel (`/invite @Your Bot Name`)
+- Get the **Channel ID**: right-click channel → View channel details → scroll to bottom
+
+### 5. Find your Slack user ID
+
+- Click your profile picture → View Profile → ⋯ → Copy member ID
 - Format: `U01XXXXXXXX`
 
-## Token storage
+### 6. Save tokens
 
-Tokens live in `~/.claude/channels/slack/.env` (never committed):
+If you have the plugin installed, run `/slack:configure` — it guides you through writing the config file.
+
+Or manually create `~/.claude/channels/slack/.env`:
 
 ```
 SLACK_BOT_TOKEN=xoxb-...
@@ -68,21 +81,8 @@ SLACK_CHANNEL_ID=C01XXXXXXXX
 ```bash
 mkdir -p ~/.claude/channels/slack
 chmod 700 ~/.claude/channels/slack
-# write the file, then:
 chmod 600 ~/.claude/channels/slack/.env
 ```
-
-Or use the configure skill (see below).
-
-## Configure
-
-If you have this plugin installed in Claude Code, run:
-
-```
-/slack:configure
-```
-
-This guides you through writing the `.env` file.
 
 ## Start
 
@@ -155,9 +155,12 @@ Uses [Biome](https://biomejs.dev) for linting and formatting.
 
 ## Limitations
 
-- Personal use only (one allowed user ID)
-- Single Claude Code session at a time (enforced by `flock(2)` — second session gets a clear error)
+- One Slack app per user — Slack's Socket Mode doesn't support sharing an app across users (events are round-robined, not duplicated)
+- Single Claude Code session per user at a time (enforced by `flock(2)` — second session gets a clear error)
 - No file attachment support yet
 - Inbound messages require `--dangerously-load-development-channels` flag (research preview)
 - Permission relay requires Claude Code v2.1.81+
-- Set `SLACK_CHANNEL_DEBUG=1` in env to enable debug file logging to `~/.claude/channels/slack/debug.log`
+
+## Debugging
+
+Set `SLACK_CHANNEL_DEBUG=1` in env to enable debug file logging to `~/.claude/channels/slack/debug.log`.

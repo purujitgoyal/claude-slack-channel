@@ -10,6 +10,7 @@
     "test:unit": "bun test --filter '!integration'",
     "test:integration": "INTEGRATION=1 bun test test/integration.test.ts",
     "diagnose": "bun test/diagnose.ts",
+    "typecheck": "bun --typecheck server.ts",
     "check": "biome check .",
     "fix": "biome check --fix ."
   },

@@ -1,6 +1,6 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { App } from '@slack/bolt';
-import { log, stripMentions } from './config.ts';
+import { codePreviewBlock, log, stripMentions } from './config.ts';
 import {
   getActiveThreadTs,
   pendingPermissions,
@@ -8,36 +8,6 @@ import {
   saveSession,
   setActiveThreadTs,
 } from './session.ts';
-
-// ---------------------------------------------------------------------------
-// Format raw JSON input_preview into a readable one-liner for confirmations
-// ---------------------------------------------------------------------------
-
-function formatInputPreview(toolName: string, raw: string): string {
-  try {
-    const obj = JSON.parse(raw);
-    switch (toolName) {
-      case 'Bash':
-        return obj.command ?? raw;
-      case 'Write':
-      case 'Read':
-      case 'Glob':
-        return obj.file_path ?? obj.pattern ?? raw;
-      case 'Edit':
-        return obj.file_path ?? raw;
-      case 'Grep':
-        return obj.pattern ? `/${obj.pattern}/` : raw;
-      default:
-        // For unknown tools, show first string value as a hint
-        for (const v of Object.values(obj)) {
-          if (typeof v === 'string' && v.length > 0) return v.slice(0, 120);
-        }
-        return raw;
-    }
-  } catch {
-    return raw;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Module state — populated by startSlack()
@@ -253,24 +223,25 @@ function registerBoltHandlers(mcp: Server) {
       channelId;
 
     const label = behavior === 'allow' ? 'Allowed' : 'Denied';
-    const snippet = details
-      ? `\`${details.tool_name}\` \`\`\`${formatInputPreview(details.tool_name, details.input_preview)}\`\`\``
-          .slice(0, 150)
-      : `request \`${request_id}\``;
+    const preview = details?.input_preview ?? '';
+    const summaryText = details
+      ? `*${label}* — \`${details.tool_name}\``
+      : `*${label}* — request \`${request_id}\``;
 
     if (message?.ts && msgChannelId) {
       await client.chat.update({
         channel: msgChannelId,
         ts: message.ts,
-        text: `${label} — ${snippet}`,
+        text: summaryText,
         blocks: [
           {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `*${label}* — ${snippet}`,
+              text: summaryText,
             },
           },
+          ...codePreviewBlock(preview),
         ],
       });
     }
@@ -282,11 +253,15 @@ function registerBoltHandlers(mcp: Server) {
 // on prolonged disconnect
 // ---------------------------------------------------------------------------
 
-const HEALTH_TIMEOUT = 120_000; // 2 minutes
-const OUTAGE_THRESHOLD = 10_000; // 10s — only notify if disconnect lasts longer than this
-const RECONNECT_DEBOUNCE = 5_000; // 5s — wait for connection to stabilize after reconnect
+export const HEALTH_TIMEOUT = 120_000; // 2 minutes
+export const OUTAGE_THRESHOLD = 10_000; // 10s — only notify if disconnect lasts longer than this
+export const RECONNECT_DEBOUNCE = 5_000; // 5s — wait for connection to stabilize after reconnect
 
-function monitorConnection(mcp: Server, cid: string, onDead: () => void): () => void {
+function monitorConnection(
+  mcp: Server,
+  cid: string,
+  onDead: () => void,
+): () => void {
   // Access the underlying SocketModeClient from Bolt's receiver
   const socketClient = (bolt!.receiver as any).client;
   let healthTimeout: ReturnType<typeof setTimeout> | null = null;

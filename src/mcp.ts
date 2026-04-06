@@ -4,8 +4,17 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { log, textResult } from './config.ts';
-import { pendingPermissions, saveSession, setActiveThreadTs } from './session.ts';
+import {
+  codePreviewBlock,
+  formatInputPreview,
+  log,
+  textResult,
+} from './config.ts';
+import {
+  pendingPermissions,
+  saveSession,
+  setActiveThreadTs,
+} from './session.ts';
 
 // ---------------------------------------------------------------------------
 // SlackBridge — injected by server.ts to avoid circular deps with slack.ts
@@ -221,10 +230,7 @@ const PermissionRequestSchema = z.object({
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   const b = requireBridge();
   const { request_id, tool_name, description, input_preview } = params;
-  const preview =
-    input_preview.length > 200
-      ? `${input_preview.slice(0, 197)}...`
-      : input_preview;
+  const preview = formatInputPreview(tool_name, input_preview);
 
   await b.postThreaded({
     text: `Claude wants to use \`${tool_name}\` — tap Allow or Deny`,
@@ -236,14 +242,7 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
           text: `*Claude wants to use \`${tool_name}\`*\n${description}`,
         },
       },
-      ...(preview
-        ? [
-            {
-              type: 'context',
-              elements: [{ type: 'mrkdwn', text: `\`\`\`${preview}\`\`\`` }],
-            },
-          ]
-        : []),
+      ...codePreviewBlock(preview),
       {
         type: 'actions',
         block_id: `permission_${request_id}`,
@@ -266,6 +265,10 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
       },
     ],
   });
-  pendingPermissions.set(request_id, { tool_name, description, input_preview: preview });
+  pendingPermissions.set(request_id, {
+    tool_name,
+    description,
+    input_preview: preview,
+  });
   log(`permission request ${request_id} (${tool_name}) sent to Slack`);
 });

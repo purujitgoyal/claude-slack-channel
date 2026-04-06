@@ -553,30 +553,29 @@ describe('Bolt Handlers', () => {
     });
 
     test('confirmation includes tool name when pendingPermissions has entry', async () => {
+      // pendingPermissions stores already-formatted preview (formatInputPreview
+      // is called in mcp.ts when the request arrives, not at verdict time)
       pendingPermissions.set('req_1', {
         tool_name: 'Bash',
         description: 'Run a command',
-        input_preview: JSON.stringify({ command: 'git status', description: 'Show status' }),
+        input_preview: 'git status',
       });
       const payload = makeActionPayload('allow_req_1', 'allow:req_1');
       await simulateAction('allow_req_1', payload);
 
+      // Summary text contains tool name
       expect(payload.client.chat.update).toHaveBeenCalledWith(
         expect.objectContaining({
           text: expect.stringContaining('`Bash`'),
         }),
       );
-      // Should extract command, not show raw JSON
-      expect(payload.client.chat.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          text: expect.stringContaining('git status'),
-        }),
+      // Command preview is in a separate code block within blocks array
+      const call = payload.client.chat.update.mock.calls[0][0];
+      const codeBlock = call.blocks.find(
+        (b: any) => b.type === 'section' && b.text?.text?.includes('git status'),
       );
-      expect(payload.client.chat.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          text: expect.not.stringContaining('{'),
-        }),
-      );
+      expect(codeBlock).toBeDefined();
+      expect(codeBlock.text.text).toContain('```');
     });
 
     test('falls back to request_id when pendingPermissions has no entry', async () => {

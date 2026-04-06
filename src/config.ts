@@ -31,6 +31,54 @@ export function stripMentions(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Format raw JSON input_preview into a readable one-liner for confirmations
+// ---------------------------------------------------------------------------
+
+const PREVIEW_MAX = 2500; // Slack section block mrkdwn limit is 3000; leave room for formatting
+
+function truncate(s: string, max: number = PREVIEW_MAX): string {
+  return s.length > max ? `${s.slice(0, max)}...` : s;
+}
+
+import type { KnownBlock } from '@slack/types';
+
+export function codePreviewBlock(preview: string): KnownBlock[] {
+  if (!preview) return [];
+  return [
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: `\`\`\`\n${preview}\n\`\`\`` },
+    },
+  ];
+}
+
+export function formatInputPreview(toolName: string, raw: string): string {
+  try {
+    const obj = JSON.parse(raw);
+    switch (toolName) {
+      case 'Bash':
+        return truncate(obj.command ?? raw);
+      case 'Write':
+      case 'Read':
+      case 'Glob':
+        return truncate(obj.file_path ?? obj.pattern ?? raw);
+      case 'Edit':
+        return truncate(obj.file_path ?? raw);
+      case 'Grep':
+        return obj.pattern ? truncate(`/${obj.pattern}/`) : truncate(raw);
+      default:
+        // For unknown tools, show first string value as a hint
+        for (const v of Object.values(obj)) {
+          if (typeof v === 'string' && v.length > 0) return truncate(v);
+        }
+        return truncate(raw);
+    }
+  } catch {
+    return truncate(raw);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
 

@@ -103,20 +103,21 @@ export function shutdownGracefully(): void {
   if (isChannelActive())
     saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
   releaseLock();
-  stopSlack().finally(() => process.exit(0));
+  stopSlack().finally(() => {
+    clearTimeout(forceExitTimer);
+    process.exit(0);
+  });
 }
 
 if (import.meta.main) {
   process.on('SIGINT', shutdownGracefully);
   process.on('SIGTERM', shutdownGracefully);
   process.stdin.on('close', shutdownGracefully);
-}
 
-// ---------------------------------------------------------------------------
-// Connect MCP transport
-// ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Connect MCP transport
+  // ---------------------------------------------------------------------------
 
-if (import.meta.main) {
   await mcp.connect(new StdioServerTransport());
   log('MCP connected — waiting for channel activation');
 }

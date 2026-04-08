@@ -603,3 +603,57 @@ process.exit(0);
     15_000,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Sleep Simulation / Outage Recovery
+//
+// MANUAL TEST — automated version would require a 70+ second wait and
+// programmatic Bolt socket disconnect, which is not reliably supported by
+// @slack/socket-mode's public API and would make CI extremely slow.
+//
+// HOW TO VERIFY MANUALLY:
+//   1. Start the bridge in dev mode (loaded via --dangerously-load-development-channels).
+//   2. Note the active thread ID in the session (check ~/.claude/channels/slack/session.json).
+//   3. Disable wifi or put the laptop to sleep for > 90 seconds.
+//   4. While offline / asleep, have someone post a message in the active thread
+//      from a different device/account (or queue it to be sent during the gap).
+//   5. Reconnect / wake the laptop.
+//   6. Within ~35 seconds of reconnect (RECONNECT_DEBOUNCE=5s + recovery fetch),
+//      verify that Claude receives a notifications/claude/channel notification
+//      whose text contains "[Recovered after Xm outage]" framing and the content
+//      of the message that was posted during the gap.
+//   7. Check ~/.claude/channels/slack/debug.log (set SLACK_CHANNEL_DEBUG=1) for
+//      lines like "Recovery: fetched N messages since <ts>" to confirm the
+//      recoverMissedMessages path ran.
+//
+// AUTOMATED APPROACH (future work if needed):
+//   - Use getWebSocket(app).terminate() to simulate disconnect.
+//   - Wait 70 s (> RECOVERY_THRESHOLD=60s).
+//   - Post a test message via app.client.chat.postMessage() during the gap.
+//   - Wait for the 'connected' event + 5 s debounce + recovery fetch.
+//   - Intercept mcp.notification calls via a mock injected through setMcpClient().
+//   - Assert the notification payload contains the marker string.
+//   The main obstacle is that terminate() triggers reconnecting→connected in
+//   ~800ms (per existing tests), so it cannot simulate a 70-second gap without
+//   additional machinery to suppress auto-reconnect.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('Integration: Outage Recovery', () => {
+  // MANUAL TEST: see block comment above for verification steps.
+  test.skip(
+    'recovers messages missed during simulated outage (MANUAL)',
+    async () => {
+      // This test is intentionally skipped — see the manual verification
+      // instructions in the block comment above.
+      //
+      // Automated preconditions that are hard to meet in CI:
+      //   - Suppress Bolt auto-reconnect for 70+ seconds to exceed RECOVERY_THRESHOLD.
+      //   - Inject a mock MCP client to intercept notifications/claude/channel calls.
+      //   - Post a Slack message during the simulated gap via app.client.chat.postMessage.
+      //
+      // When implementing automation, use getWebSocket(app).terminate() with a
+      // setMcpClient() mock and wait for the reconnect debounce + recovery to
+      // complete before asserting the forwarded notification body.
+    },
+  );
+});

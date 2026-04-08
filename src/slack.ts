@@ -349,12 +349,62 @@ function registerBoltHandlers(mcp: Server) {
 }
 
 // ---------------------------------------------------------------------------
+// formatRestoredMessage — build the reconnect notification body
+// ---------------------------------------------------------------------------
+
+function formatDuration(ms: number): string {
+  const totalMin = Math.round(ms / 60_000);
+  if (totalMin < 60) return `${totalMin}m`;
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
+function formatRestoredMessage(
+  outageMs: number,
+  result: { recovered: number; error?: string },
+): string {
+  if (outageMs < RECOVERY_THRESHOLD) {
+    return 'Slack connection restored.';
+  }
+  const dur = formatDuration(outageMs);
+  if (result.error) {
+    return `Slack connection restored after ${dur}. Recovery failed: ${result.error}. Check Slack thread manually.`;
+  }
+  if (result.recovered > 0) {
+    return `Slack connection restored after ${dur}. Recovered ${result.recovered} missed messages — they appear above this notice.`;
+  }
+  return `Slack connection restored after ${dur}. No messages missed.`;
+}
+
+// ---------------------------------------------------------------------------
 // Connection monitoring — logs lifecycle events and notifies Claude on outages
 // ---------------------------------------------------------------------------
 
 export const OUTAGE_THRESHOLD = 10_000; // 10s — only notify if disconnect lasts longer than this
 export const RECONNECT_DEBOUNCE = 5_000; // 5s — wait for connection to stabilize after reconnect
 export const RECOVERY_THRESHOLD = 60_000; // 60s — only fetch history on reconnect if outage exceeded this
+
+// ---------------------------------------------------------------------------
+// Recovery function seam — allows tests to stub recoverMissedMessages
+// ---------------------------------------------------------------------------
+
+type RecoveryFn = (
+  mcp: Server,
+  sinceTs: string | null,
+) => Promise<{ recovered: number; error?: string }>;
+
+let recoveryFn: RecoveryFn = recoverMissedMessages;
+
+/** Override the recovery function for testing only. */
+export function setRecoveryFn(fn: RecoveryFn): void {
+  recoveryFn = fn;
+}
+
+/** Reset recovery function to the real implementation — exported for test cleanup. */
+export function resetRecoveryFn(): void {
+  recoveryFn = recoverMissedMessages;
+}
 
 function monitorConnection(
   mcp: Server,
@@ -440,20 +490,37 @@ function monitorConnection(
 
     // Debounce — wait for connection to stabilize before notifying Claude
     if (reconnectNotifyTimer) clearTimeout(reconnectNotifyTimer);
-    reconnectNotifyTimer = setTimeout(() => {
+    reconnectNotifyTimer = setTimeout(async () => {
       reconnectNotifyTimer = null;
+
+      // Compute outage duration
+      const outageMs =
+        disconnectedAt !== null ? Date.now() - disconnectedAt : 0;
+
+      // Attempt recovery if outage exceeded the threshold
+      let recoveryResult: { recovered: number; error?: string } = {
+        recovered: 0,
+      };
+      if (outageMs >= RECOVERY_THRESHOLD) {
+        recoveryResult = await recoveryFn(mcp, getLastSeenEventTs());
+      }
+
+      // Build notification body based on outcome
+      const content = formatRestoredMessage(outageMs, recoveryResult);
+
+      // Reset state before firing notification (recovery already ran above)
+      disconnectedAt = null;
       notifiedDisconnect = false;
+
       mcp
         .notification({
           method: 'notifications/claude/channel',
           params: {
-            content:
-              'Slack connection restored. Messages during the outage may have been missed.',
+            content,
             meta: { channel_id: cid, event_ts: '' },
           },
         })
         .catch(() => {});
-      disconnectedAt = null;
     }, RECONNECT_DEBOUNCE);
     reconnectNotifyTimer.unref();
   });

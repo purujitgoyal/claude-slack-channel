@@ -82,7 +82,9 @@ mock.module('@slack/bolt', () => {
 // Import modules under test (uses mocked @slack/bolt)
 // ---------------------------------------------------------------------------
 
-const { startSlack, stopSlack } = await import('../src/slack');
+const { startSlack, stopSlack, setRecoveryFn, resetRecoveryFn } = await import(
+  '../src/slack'
+);
 const {
   shutdownGracefully,
   resetShuttingDown,
@@ -94,6 +96,7 @@ const {
   resetActivateFn,
 } = await import('../server');
 const { mcp } = await import('../src/mcp');
+const { setLastSeenEventTs } = await import('../src/session');
 
 // ---------------------------------------------------------------------------
 // Test suite
@@ -489,6 +492,173 @@ describe('Connection Monitoring', () => {
       for (const call of mcpMock.notification.mock.calls) {
         expect(call[0].params.meta.channel_id).toBe(TEST_CHANNEL_ID);
       }
+    });
+  });
+
+  // =========================================================================
+  // Reconnect Recovery — outage recovery integration
+  // =========================================================================
+
+  describe('reconnect recovery', () => {
+    let origDateNow: () => number;
+
+    beforeEach(() => {
+      origDateNow = Date.now;
+      resetRecoveryFn();
+    });
+
+    afterEach(() => {
+      Date.now = origDateNow;
+      resetRecoveryFn();
+    });
+
+    test('outage < RECOVERY_THRESHOLD does not call recoverMissedMessages', async () => {
+      const recoverySpy = mock(async () => ({ recovered: 0 }));
+      setRecoveryFn(recoverySpy);
+
+      // T0: disconnect
+      let now = 1_000_000;
+      Date.now = () => now;
+      app.socketClient.emit('disconnected');
+
+      // Advance OUTAGE_THRESHOLD to fire the "lost" notification
+      now += OUTAGE_THRESHOLD;
+      await timers.tick(OUTAGE_THRESHOLD);
+      mcpMock.notification.mockClear();
+
+      // T0+30s: reconnect (below RECOVERY_THRESHOLD of 60s)
+      now += 30_000;
+      app.socketClient.emit('connected');
+
+      // Advance through the 5s reconnect debounce
+      now += RECONNECT_DEBOUNCE;
+      await timers.tick(RECONNECT_DEBOUNCE);
+
+      expect(recoverySpy).not.toHaveBeenCalled();
+    });
+
+    test('outage ≥ RECOVERY_THRESHOLD calls recoverMissedMessages with current cursor', async () => {
+      const recoverySpy = mock(async () => ({ recovered: 0 }));
+      setRecoveryFn(recoverySpy);
+
+      // Set a known cursor
+      setLastSeenEventTs('1775644620.000001');
+
+      // T0: disconnect
+      let now = 1_000_000;
+      Date.now = () => now;
+      app.socketClient.emit('disconnected');
+
+      // Fire the "lost" notification
+      now += OUTAGE_THRESHOLD;
+      await timers.tick(OUTAGE_THRESHOLD);
+      mcpMock.notification.mockClear();
+
+      // T0+90s: reconnect (above RECOVERY_THRESHOLD of 60s)
+      now += 90_000;
+      app.socketClient.emit('connected');
+
+      // Advance through the debounce
+      now += RECONNECT_DEBOUNCE;
+      await timers.tick(RECONNECT_DEBOUNCE);
+
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
+      expect(recoverySpy.mock.calls[0][1]).toBe('1775644620.000001');
+    });
+
+    test('restored notification: short outage, only terse message', async () => {
+      setRecoveryFn(mock(async () => ({ recovered: 0 })));
+
+      // Short outage: fire the "lost" notification, then reconnect before RECOVERY_THRESHOLD
+      let now = 1_000_000;
+      Date.now = () => now;
+      app.socketClient.emit('disconnected');
+
+      now += OUTAGE_THRESHOLD;
+      await timers.tick(OUTAGE_THRESHOLD); // "lost" notification fires, notifiedDisconnect = true
+      mcpMock.notification.mockClear();
+
+      // Reconnect 30s after disconnect (10s + 20s since disconnect started)
+      now += 20_000; // total 30s from T0
+      app.socketClient.emit('connected');
+
+      now += RECONNECT_DEBOUNCE;
+      await timers.tick(RECONNECT_DEBOUNCE);
+
+      expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+      const content = mcpMock.notification.mock.calls[0][0].params.content;
+      expect(content).toBe('Slack connection restored.');
+    });
+
+    test('restored notification: long outage, no missed messages', async () => {
+      setRecoveryFn(mock(async () => ({ recovered: 0 })));
+
+      let now = 1_000_000;
+      Date.now = () => now;
+      app.socketClient.emit('disconnected');
+
+      now += OUTAGE_THRESHOLD;
+      await timers.tick(OUTAGE_THRESHOLD);
+      mcpMock.notification.mockClear();
+
+      // Reconnect 90s after disconnect
+      now += 80_000; // total 90s from T0
+      app.socketClient.emit('connected');
+
+      now += RECONNECT_DEBOUNCE;
+      await timers.tick(RECONNECT_DEBOUNCE);
+
+      expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+      const content = mcpMock.notification.mock.calls[0][0].params.content;
+      expect(content).toContain('Slack connection restored after');
+      expect(content).toContain('m');
+      expect(content).toContain('No messages missed.');
+    });
+
+    test('restored notification: long outage, N recovered', async () => {
+      setRecoveryFn(mock(async () => ({ recovered: 3 })));
+
+      let now = 1_000_000;
+      Date.now = () => now;
+      app.socketClient.emit('disconnected');
+
+      now += OUTAGE_THRESHOLD;
+      await timers.tick(OUTAGE_THRESHOLD);
+      mcpMock.notification.mockClear();
+
+      now += 80_000; // total 90s
+      app.socketClient.emit('connected');
+
+      now += RECONNECT_DEBOUNCE;
+      await timers.tick(RECONNECT_DEBOUNCE);
+
+      expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+      const content = mcpMock.notification.mock.calls[0][0].params.content;
+      expect(content).toContain('Recovered 3 missed messages');
+    });
+
+    test('restored notification: recovery failed', async () => {
+      setRecoveryFn(
+        mock(async () => ({ recovered: 0, error: 'rate_limited' })),
+      );
+
+      let now = 1_000_000;
+      Date.now = () => now;
+      app.socketClient.emit('disconnected');
+
+      now += OUTAGE_THRESHOLD;
+      await timers.tick(OUTAGE_THRESHOLD);
+      mcpMock.notification.mockClear();
+
+      now += 80_000; // total 90s
+      app.socketClient.emit('connected');
+
+      now += RECONNECT_DEBOUNCE;
+      await timers.tick(RECONNECT_DEBOUNCE);
+
+      expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+      const content = mcpMock.notification.mock.calls[0][0].params.content;
+      expect(content).toContain('Recovery failed: rate_limited');
     });
   });
 });

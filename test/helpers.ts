@@ -18,7 +18,6 @@ export class FakeTimers {
   install(): void {
     this.timers.clear();
     this.elapsed = 0;
-    const self = this;
 
     (globalThis as any).setTimeout = (
       cb: Function,
@@ -26,16 +25,16 @@ export class FakeTimers {
       ...args: any[]
     ) => {
       const handle = { unref() {}, ref() {} };
-      self.timers.set(handle, {
+      this.timers.set(handle, {
         callback: () => cb(...args),
         delay,
-        created: self.elapsed,
+        created: this.elapsed,
       });
       return handle;
     };
 
     (globalThis as any).clearTimeout = (handle: any) => {
-      if (handle != null) self.timers.delete(handle);
+      if (handle != null) this.timers.delete(handle);
     };
   }
 
@@ -70,7 +69,11 @@ export class FakeTimers {
 // Constants
 // ---------------------------------------------------------------------------
 
-export { OUTAGE_THRESHOLD, RECONNECT_DEBOUNCE } from '../src/slack.ts';
+export {
+  OUTAGE_THRESHOLD,
+  RECONNECT_DEBOUNCE,
+  RECOVERY_THRESHOLD,
+} from '../src/slack.ts';
 
 export const TEST_CHANNEL_ID = 'C_TEST';
 export const TEST_ALLOWED_USER = 'U_ALLOWED';

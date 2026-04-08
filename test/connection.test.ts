@@ -49,6 +49,9 @@ mock.module('@slack/bolt', () => {
         conversations: {
           replies: mock(async () => ({ ok: true, messages: [] })),
         },
+        auth: {
+          test: mock(async () => ({ ok: true, user_id: 'U_TEST_MOCK' })),
+        },
         reactions: { add: mock(async () => ({ ok: true })) },
       };
       _messageHandlers: any[] = [];

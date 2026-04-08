@@ -6,12 +6,12 @@
  * is managed.
  */
 
-import { mock, describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
-  TEST_CHANNEL_ID,
   TEST_ALLOWED_USER,
-  TEST_BOT_TOKEN,
   TEST_APP_TOKEN,
+  TEST_BOT_TOKEN,
+  TEST_CHANNEL_ID,
 } from './helpers';
 
 // ---------------------------------------------------------------------------
@@ -42,6 +42,9 @@ mock.module('@slack/bolt', () => {
           conversations: {
             replies: mock(async () => ({ ok: true, messages: [] })),
           },
+          auth: {
+            test: mock(async () => ({ ok: true, user_id: 'U_TEST_MOCK' })),
+          },
           reactions: { add: mock(async () => ({ ok: true })) },
         };
         this.receiver = { client: this.socketClient };
@@ -68,9 +71,7 @@ mock.module('@slack/bolt', () => {
 // ---------------------------------------------------------------------------
 
 const { startSlack, stopSlack, postThreaded } = await import('../src/slack');
-const { setActiveThreadTs, getActiveThreadTs } = await import(
-  '../src/session'
-);
+const { setActiveThreadTs, getActiveThreadTs } = await import('../src/session');
 
 // ---------------------------------------------------------------------------
 // Test suite
@@ -150,7 +151,9 @@ describe('Thread Management', () => {
     });
 
     test('supports Block Kit blocks', async () => {
-      const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: 'hi' } }];
+      const blocks = [
+        { type: 'section', text: { type: 'mrkdwn', text: 'hi' } },
+      ];
       await postThreaded({ text: 'fallback', blocks });
 
       expect(postMessageMock).toHaveBeenCalledWith(

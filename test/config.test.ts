@@ -5,11 +5,11 @@
  * mention stripping, path constants.
  */
 
-import { describe, test, expect, afterEach } from 'bun:test';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { loadEnv, stripMentions, textResult, MENTION_RE } from '../src/config';
+import { join } from 'node:path';
+import { loadEnv, MENTION_RE, stripMentions, textResult } from '../src/config';
 
 // ---------------------------------------------------------------------------
 // loadEnv

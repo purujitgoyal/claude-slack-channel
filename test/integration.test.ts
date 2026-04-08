@@ -20,7 +20,7 @@
  * - Reconnection after terminate() takes ~800-1000ms typically.
  */
 
-import { describe, test, expect, beforeAll, afterEach } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
 import { App } from '@slack/bolt';
 
@@ -37,7 +37,8 @@ function loadTokens(): {
   channelId: string;
 } | null {
   if (!existsSync(ENV_PATH)) return null;
-  const { loadEnv } = require('../src/config') as typeof import('../src/config');
+  const { loadEnv } =
+    require('../src/config') as typeof import('../src/config');
   const env = loadEnv(ENV_PATH);
   if (!env.SLACK_BOT_TOKEN || !env.SLACK_APP_TOKEN || !env.SLACK_CHANNEL_ID)
     return null;
@@ -68,7 +69,8 @@ function waitForEvent(
 ): Promise<any[]> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error(`Timeout waiting for '${event}' (${timeoutMs}ms)`)),
+      () =>
+        reject(new Error(`Timeout waiting for '${event}' (${timeoutMs}ms)`)),
       timeoutMs,
     );
     getSocketClient(app).once(event, (...args: any[]) => {
@@ -131,12 +133,24 @@ function trackEvents(app: App): {
     handlers.push([event, handler]);
   }
 
-  on('connecting', () => events.push({ time: Date.now() - start, event: 'connecting' }));
-  on('connected', () => events.push({ time: Date.now() - start, event: 'connected' }));
-  on('reconnecting', () => events.push({ time: Date.now() - start, event: 'reconnecting' }));
-  on('disconnecting', () => events.push({ time: Date.now() - start, event: 'disconnecting' }));
+  on('connecting', () =>
+    events.push({ time: Date.now() - start, event: 'connecting' }),
+  );
+  on('connected', () =>
+    events.push({ time: Date.now() - start, event: 'connected' }),
+  );
+  on('reconnecting', () =>
+    events.push({ time: Date.now() - start, event: 'reconnecting' }),
+  );
+  on('disconnecting', () =>
+    events.push({ time: Date.now() - start, event: 'disconnecting' }),
+  );
   on('disconnected', (err?: Error) =>
-    events.push({ time: Date.now() - start, event: 'disconnected', detail: err?.message }),
+    events.push({
+      time: Date.now() - start,
+      event: 'disconnected',
+      detail: err?.message,
+    }),
   );
   on('error', (err: any) =>
     events.push({
@@ -228,7 +242,9 @@ describe.skipIf(SKIP)('Integration: Connection Lifecycle', () => {
     expect(getSocketClient(app).isActive()).toBe(true);
 
     // Verify: no 'disconnected' event was emitted
-    const hasDisconnected = tracker.events.some((e) => e.event === 'disconnected');
+    const hasDisconnected = tracker.events.some(
+      (e) => e.event === 'disconnected',
+    );
     expect(hasDisconnected).toBe(false);
 
     console.log('[terminate] Events:', JSON.stringify(tracker.events));
@@ -355,8 +371,12 @@ describe.skipIf(SKIP)('Integration: Connection Lifecycle', () => {
     // Wait for potential auto-reconnect
     await Bun.sleep(10_000);
 
-    const wasDisconnected = tracker.events.some((e) => e.event === 'disconnected');
-    const hadReconnecting = tracker.events.some((e) => e.event === 'reconnecting');
+    const wasDisconnected = tracker.events.some(
+      (e) => e.event === 'disconnected',
+    );
+    const hadReconnecting = tracker.events.some(
+      (e) => e.event === 'reconnecting',
+    );
     const isActive = getSocketClient(app).isActive();
 
     console.log(
@@ -381,8 +401,12 @@ describe.skipIf(SKIP)('Integration: Connection Lifecycle', () => {
 
     await Bun.sleep(15_000);
 
-    const wasDisconnected = tracker.events.some((e) => e.event === 'disconnected');
-    const hadReconnecting = tracker.events.some((e) => e.event === 'reconnecting');
+    const wasDisconnected = tracker.events.some(
+      (e) => e.event === 'disconnected',
+    );
+    const hadReconnecting = tracker.events.some(
+      (e) => e.event === 'reconnecting',
+    );
     const isActive = getSocketClient(app).isActive();
 
     console.log(
@@ -414,13 +438,21 @@ describe.skipIf(SKIP)('Integration: Diagnostics', () => {
     await startAndWaitReady(app);
 
     const sc = getSocketClient(app);
-    console.log('[config]', JSON.stringify({
-      autoReconnectEnabled: sc.autoReconnectEnabled ?? '(default: true)',
-      clientPingTimeoutMs: sc.clientPingTimeoutMillis ?? '(default: 5000)',
-      serverPingTimeoutMs: sc.serverPingTimeoutMillis ?? '(default: 30000)',
-      pingPongLoggingEnabled: sc.pingPongLoggingEnabled ?? '(default: false)',
-      wsReadyState: getWebSocket(app)?.readyState,
-    }, null, 2));
+    console.log(
+      '[config]',
+      JSON.stringify(
+        {
+          autoReconnectEnabled: sc.autoReconnectEnabled ?? '(default: true)',
+          clientPingTimeoutMs: sc.clientPingTimeoutMillis ?? '(default: 5000)',
+          serverPingTimeoutMs: sc.serverPingTimeoutMillis ?? '(default: 30000)',
+          pingPongLoggingEnabled:
+            sc.pingPongLoggingEnabled ?? '(default: false)',
+          wsReadyState: getWebSocket(app)?.readyState,
+        },
+        null,
+        2,
+      ),
+    );
 
     await safeStop(app);
     expect(true).toBe(true);
@@ -434,18 +466,26 @@ describe.skipIf(SKIP)('Integration: Diagnostics', () => {
     const activity: { type: string; time: number }[] = [];
     const start = Date.now();
 
-    ws.on('ping', () => activity.push({ type: 'ping-in', time: Date.now() - start }));
-    ws.on('pong', () => activity.push({ type: 'pong-in', time: Date.now() - start }));
+    ws.on('ping', () =>
+      activity.push({ type: 'ping-in', time: Date.now() - start }),
+    );
+    ws.on('pong', () =>
+      activity.push({ type: 'pong-in', time: Date.now() - start }),
+    );
 
     await Bun.sleep(30_000);
 
     const pings = activity.filter((a) => a.type === 'ping-in');
     const pongs = activity.filter((a) => a.type === 'pong-in');
 
-    console.log(`[ping/pong] Over 30s: ${pings.length} pings, ${pongs.length} pongs`);
+    console.log(
+      `[ping/pong] Over 30s: ${pings.length} pings, ${pongs.length} pongs`,
+    );
     if (pings.length > 1) {
       const gaps = pings.slice(1).map((p, i) => p.time - pings[i].time);
-      console.log(`[ping/pong] Ping intervals: ${gaps.map((g) => `${g}ms`).join(', ')}`);
+      console.log(
+        `[ping/pong] Ping intervals: ${gaps.map((g) => `${g}ms`).join(', ')}`,
+      );
     }
     console.log('[ping/pong] Activity:', JSON.stringify(activity));
 
@@ -470,8 +510,12 @@ describe.skipIf(SKIP)('Integration: Diagnostics', () => {
       await Bun.sleep(500);
     }
 
-    console.log(`[latency] Ping latencies: ${latencies.map((l) => `${l}ms`).join(', ')}`);
-    console.log(`[latency] Avg: ${Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)}ms`);
+    console.log(
+      `[latency] Ping latencies: ${latencies.map((l) => `${l}ms`).join(', ')}`,
+    );
+    console.log(
+      `[latency] Avg: ${Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)}ms`,
+    );
 
     // WebSocket ping should be sub-second
     expect(Math.max(...latencies)).toBeLessThan(5_000);

@@ -16,7 +16,7 @@
 
 import { writeFileSync } from 'node:fs';
 import { App } from '@slack/bolt';
-import { loadEnv, ENV_PATH, log } from '../src/config';
+import { ENV_PATH, loadEnv, log } from '../src/config';
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -116,10 +116,14 @@ function attachWsMonitoring() {
   if (!ws) return;
 
   ws.on('close', (code: number, reason: Buffer) => {
-    record('ws:close', `code=${code} reason=${reason?.toString() || '(none)'}`, {
-      wsCloseCode: code,
-      wsCloseReason: reason?.toString(),
-    });
+    record(
+      'ws:close',
+      `code=${code} reason=${reason?.toString() || '(none)'}`,
+      {
+        wsCloseCode: code,
+        wsCloseReason: reason?.toString(),
+      },
+    );
   });
 
   ws.on('error', (err: Error) => {
@@ -171,8 +175,11 @@ function startEventLoopMonitor() {
 async function main() {
   console.error('='.repeat(60));
   console.error('Slack Connection Diagnostics');
-  console.error(`Duration: ${durationMs ? `${durationMs / 1000}s` : 'indefinite (Ctrl+C to stop)'}`);
-  if (blockMs) console.error(`Will simulate ${blockMs}ms event loop block after 10s`);
+  console.error(
+    `Duration: ${durationMs ? `${durationMs / 1000}s` : 'indefinite (Ctrl+C to stop)'}`,
+  );
+  if (blockMs)
+    console.error(`Will simulate ${blockMs}ms event loop block after 10s`);
   console.error('='.repeat(60));
 
   record('starting');
@@ -183,7 +190,9 @@ async function main() {
   console.error('\nSocketModeClient config:');
   console.error(`  autoReconnectEnabled: ${sc.autoReconnectEnabled ?? true}`);
   console.error(`  clientPingTimeout: ${sc.clientPingTimeoutMillis ?? 5000}ms`);
-  console.error(`  serverPingTimeout: ${sc.serverPingTimeoutMillis ?? 30000}ms`);
+  console.error(
+    `  serverPingTimeout: ${sc.serverPingTimeoutMillis ?? 30000}ms`,
+  );
   console.error('');
 
   startEventLoopMonitor();
@@ -230,12 +239,14 @@ async function shutdown() {
     totalEvents: events.length,
     disconnects: events.filter((e) => e.event === 'disconnected').length,
     reconnects: events.filter((e) => e.event === 'connected').length,
-    errors: events.filter((e) => e.event === 'error' || e.event === 'ws:error').length,
+    errors: events.filter((e) => e.event === 'error' || e.event === 'ws:error')
+      .length,
     eventLoopLags: events.filter((e) => e.event === 'event-loop-lag').length,
     events,
   };
 
-  const reportPath = new URL('./diagnostics-report.json', import.meta.url).pathname;
+  const reportPath = new URL('./diagnostics-report.json', import.meta.url)
+    .pathname;
   writeFileSync(reportPath, JSON.stringify(report, null, 2));
   console.error(`\nReport written to ${reportPath}`);
 

@@ -164,7 +164,9 @@ function trackEvents(app: App): {
 
   return {
     events,
-    stop: () => handlers.forEach(([e, h]) => sc.removeListener(e, h)),
+    stop: () => {
+      for (const [e, h] of handlers) sc.removeListener(e, h);
+    },
   };
 }
 
@@ -535,15 +537,16 @@ describe.skipIf(SKIP)('Integration: Diagnostics', () => {
 // ---------------------------------------------------------------------------
 
 describe.skipIf(SKIP)('Integration: Lock Conflict', () => {
-  test(
-    'second instance exits with code 1 on lock conflict',
-    async () => {
-      const tempLockPath = join(tmpdir(), `slack-channel-test-${Date.now()}.lock`);
+  test('second instance exits with code 1 on lock conflict', async () => {
+    const tempLockPath = join(
+      tmpdir(),
+      `slack-channel-test-${Date.now()}.lock`,
+    );
 
-      // Inline Bun script: acquire an exclusive non-blocking flock on a given
-      // path and hold it for up to `holdMs` milliseconds, then exit 0.
-      // If flock fails (EWOULDBLOCK), exit 1.
-      const script = (lockPath: string, holdMs: number) => `
+    // Inline Bun script: acquire an exclusive non-blocking flock on a given
+    // path and hold it for up to `holdMs` milliseconds, then exit 0.
+    // If flock fails (EWOULDBLOCK), exit 1.
+    const script = (lockPath: string, holdMs: number) => `
 import { dlopen, suffix } from 'bun:ffi';
 import { closeSync, openSync, writeFileSync } from 'node:fs';
 
@@ -567,41 +570,39 @@ closeSync(fd);
 process.exit(0);
 `;
 
-      // Spawn first process — hold lock for 5 seconds
-      const proc1 = Bun.spawn(['bun', '--eval', script(tempLockPath, 5000)], {
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
+    // Spawn first process — hold lock for 5 seconds
+    const proc1 = Bun.spawn(['bun', '--eval', script(tempLockPath, 5000)], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
 
-      // Give the first process a moment to acquire the lock
-      await Bun.sleep(300);
+    // Give the first process a moment to acquire the lock
+    await Bun.sleep(300);
 
-      // Spawn second process — should fail immediately to acquire
-      const proc2 = Bun.spawn(['bun', '--eval', script(tempLockPath, 5000)], {
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
+    // Spawn second process — should fail immediately to acquire
+    const proc2 = Bun.spawn(['bun', '--eval', script(tempLockPath, 5000)], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
 
-      // Second process should exit quickly with code 1
-      const exitCode = await Promise.race([
-        proc2.exited,
-        Bun.sleep(3000).then(() => -999), // sentinel: timeout
-      ]);
+    // Second process should exit quickly with code 1
+    const exitCode = await Promise.race([
+      proc2.exited,
+      Bun.sleep(3000).then(() => -999), // sentinel: timeout
+    ]);
 
-      // Kill first process — it's no longer needed
-      try {
-        proc1.kill();
-      } catch {}
+    // Kill first process — it's no longer needed
+    try {
+      proc1.kill();
+    } catch {}
 
-      // Clean up temp lock file
-      try {
-        rmSync(tempLockPath, { force: true });
-      } catch {}
+    // Clean up temp lock file
+    try {
+      rmSync(tempLockPath, { force: true });
+    } catch {}
 
-      expect(exitCode).toBe(1);
-    },
-    15_000,
-  );
+    expect(exitCode).toBe(1);
+  }, 15_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -640,20 +641,17 @@ process.exit(0);
 
 describe.skipIf(SKIP)('Integration: Outage Recovery', () => {
   // MANUAL TEST: see block comment above for verification steps.
-  test.skip(
-    'recovers messages missed during simulated outage (MANUAL)',
-    async () => {
-      // This test is intentionally skipped — see the manual verification
-      // instructions in the block comment above.
-      //
-      // Automated preconditions that are hard to meet in CI:
-      //   - Suppress Bolt auto-reconnect for 70+ seconds to exceed RECOVERY_THRESHOLD.
-      //   - Inject a mock MCP client to intercept notifications/claude/channel calls.
-      //   - Post a Slack message during the simulated gap via app.client.chat.postMessage.
-      //
-      // When implementing automation, use getWebSocket(app).terminate() with a
-      // setMcpClient() mock and wait for the reconnect debounce + recovery to
-      // complete before asserting the forwarded notification body.
-    },
-  );
+  test.skip('recovers messages missed during simulated outage (MANUAL)', async () => {
+    // This test is intentionally skipped — see the manual verification
+    // instructions in the block comment above.
+    //
+    // Automated preconditions that are hard to meet in CI:
+    //   - Suppress Bolt auto-reconnect for 70+ seconds to exceed RECOVERY_THRESHOLD.
+    //   - Inject a mock MCP client to intercept notifications/claude/channel calls.
+    //   - Post a Slack message during the simulated gap via app.client.chat.postMessage.
+    //
+    // When implementing automation, use getWebSocket(app).terminate() with a
+    // setMcpClient() mock and wait for the reconnect debounce + recovery to
+    // complete before asserting the forwarded notification body.
+  });
 });

@@ -3,6 +3,7 @@ import { App } from '@slack/bolt';
 import { codePreviewBlock, log, stripMentions } from './config.ts';
 import {
   getActiveThreadTs,
+  getLastSeenEventTs,
   pendingPermissions,
   resolvedPermissions,
   saveSession,
@@ -96,6 +97,105 @@ async function fetchThreadSummary(threadTs: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// forwardInboundMessage — shared helper for all inbound message forwarding
+// ---------------------------------------------------------------------------
+// Used by the three bolt handler call sites below and by the T10 recovery
+// helper (recoverMissedMessages). Handles state mutations (setActiveThreadTs,
+// saveSession) appropriate to each message type so each call site stays minimal.
+//
+// Returns the eventTs that was forwarded — useful for cursor advancement in T9.
+// ---------------------------------------------------------------------------
+
+type InboundMessage =
+  | { type: 'thread_reply'; text: string; eventTs: string; userId: string }
+  | { type: 'app_mention'; text: string; eventTs: string; userId: string }
+  | {
+      type: 'old_thread_reply';
+      text: string;
+      eventTs: string;
+      userId: string;
+      oldThreadTs: string;
+    };
+
+async function forwardInboundMessage(
+  mcp: Server,
+  msg: InboundMessage,
+): Promise<string> {
+  switch (msg.type) {
+    case 'thread_reply': {
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content: msg.text,
+          meta: {
+            slack_user_id: msg.userId,
+            channel_id: channelId,
+            event_ts: msg.eventTs,
+          },
+        },
+      });
+      log('forwarded thread reply to Claude');
+      return msg.eventTs;
+    }
+
+    case 'app_mention': {
+      // The @mention message becomes the thread parent
+      setActiveThreadTs(msg.eventTs);
+      saveSession({
+        threadTs: msg.eventTs,
+        lastSeenEventTs: getLastSeenEventTs(),
+      });
+      log(`app_mention — new thread rooted at ${msg.eventTs}`);
+
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content: msg.text || '(new session)',
+          meta: {
+            slack_user_id: msg.userId,
+            channel_id: channelId,
+            event_ts: msg.eventTs,
+          },
+        },
+      });
+      log('forwarded app_mention to Claude');
+      return msg.eventTs;
+    }
+
+    case 'old_thread_reply': {
+      log(`reply in old thread ${msg.oldThreadTs} — fetching summary`);
+      const summary = await fetchThreadSummary(msg.oldThreadTs);
+
+      // Post a note in the old thread
+      await bolt!.client.chat.postMessage({
+        channel: channelId,
+        thread_ts: msg.oldThreadTs,
+        text: '\u2192 Continued in new thread',
+      });
+
+      // Reset active thread — next postThreaded call will create a new one
+      setActiveThreadTs(null);
+      saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
+
+      // Forward to Claude with old thread context
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content: `[Context from previous thread]\n${summary}\n\n[New message]\n${msg.text}`,
+          meta: {
+            slack_user_id: msg.userId,
+            channel_id: channelId,
+            event_ts: msg.eventTs,
+          },
+        },
+      });
+      log('forwarded old thread reply with summary to Claude');
+      return msg.eventTs;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Bolt handlers — registered on the App instance during startSlack()
 // ---------------------------------------------------------------------------
 
@@ -124,51 +224,24 @@ function registerBoltHandlers(mcp: Server) {
 
     const activeThreadTs = getActiveThreadTs();
 
-    // Active thread reply — forward directly
     if (threadTs === activeThreadTs) {
-      await mcp.notification({
-        method: 'notifications/claude/channel',
-        params: {
-          content: text,
-          meta: {
-            slack_user_id: msg.user ?? '',
-            channel_id: channelId,
-            event_ts: eventTs,
-          },
-        },
+      // Active thread reply — forward directly
+      await forwardInboundMessage(mcp, {
+        type: 'thread_reply',
+        text,
+        eventTs,
+        userId: msg.user ?? '',
       });
-      log('forwarded thread reply to Claude');
-      return;
+    } else {
+      // Old thread reply — fetch summary, start new thread, forward with context
+      await forwardInboundMessage(mcp, {
+        type: 'old_thread_reply',
+        text,
+        eventTs,
+        userId: msg.user ?? '',
+        oldThreadTs: threadTs,
+      });
     }
-
-    // Old thread reply — fetch summary, start new thread, forward with context
-    log(`reply in old thread ${threadTs} — fetching summary`);
-    const summary = await fetchThreadSummary(threadTs);
-
-    // Post a note in the old thread
-    await bolt!.client.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: '\u2192 Continued in new thread',
-    });
-
-    // Reset active thread — next postThreaded call will create a new one
-    setActiveThreadTs(null);
-    saveSession({ threadTs: null });
-
-    // Forward to Claude with old thread context
-    await mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content: `[Context from previous thread]\n${summary}\n\n[New message]\n${text}`,
-        meta: {
-          slack_user_id: msg.user ?? '',
-          channel_id: channelId,
-          event_ts: eventTs,
-        },
-      },
-    });
-    log('forwarded old thread reply with summary to Claude');
   });
 
   // App mention — starts a new thread
@@ -179,23 +252,12 @@ function registerBoltHandlers(mcp: Server) {
     const text = stripMentions(event.text ?? '');
     const eventTs = event.ts ?? '';
 
-    // The @mention message becomes the thread parent
-    setActiveThreadTs(eventTs);
-    saveSession({ threadTs: eventTs });
-    log(`app_mention — new thread rooted at ${eventTs}`);
-
-    await mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content: text || '(new session)',
-        meta: {
-          slack_user_id: event.user ?? '',
-          channel_id: channelId,
-          event_ts: eventTs,
-        },
-      },
+    await forwardInboundMessage(mcp, {
+      type: 'app_mention',
+      text,
+      eventTs,
+      userId: event.user ?? '',
     });
-    log('forwarded app_mention to Claude');
   });
 
   // Permission relay — receive verdict from Allow/Deny button click

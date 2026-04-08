@@ -53,7 +53,11 @@ Walk them through each setting. Present this as a checklist they can follow in t
 - [ ] Get the **Channel ID**: right-click channel → View channel details → scroll to bottom
 - [ ] Get your **Slack User ID**: click your profile picture → View Profile → ⋯ → Copy member ID (format: `U01XXXXXXXX`)
 
-### 4. Write tokens
+### 4. Install dependencies
+
+Check whether `node_modules` exists in the plugin directory (`~/.claude/plugins/slack-channel/` or wherever Claude Code installed it). If it does not exist, run `bun install` from that directory. If it already exists, skip this step — there is no need to reinstall on every invocation.
+
+### 5. Write tokens
 
 Tell the user to create the config file themselves. Show them the template and commands:
 
@@ -80,24 +84,15 @@ chmod 600 ~/.claude/channels/slack/.env
 test -f ~/.claude/channels/slack/.env && echo "Config file found" || echo "Config file not found"
 ```
 
-### 5. Activate
+### 6. Activate
 
 Tell the user:
 
-> Configuration saved. To activate the channel:
+> Configuration saved. To activate the channel, start Claude Code with inbound messages enabled:
 >
-> 1. Add `SLACK_CHANNEL_ACTIVATE=1` to your Claude Code settings env
->    (`~/.claude/settings.json` or `.claude/settings.local.json`):
+> ```bash
+> claude --dangerously-load-development-channels plugin:slack-channel@claude-slack-channel
+> ```
 >
->    ```json
->    { "env": { "SLACK_CHANNEL_ACTIVATE": "1" } }
->    ```
->
-> 2. Start Claude Code with inbound messages enabled:
->
->    ```bash
->    claude --dangerously-load-development-channels plugin:slack-channel@claude-slack-channel
->    ```
->
-> 3. @mention the bot in your channel to start a conversation.
->    Permission prompts appear as Allow/Deny buttons in the active thread.
+> Then @mention the bot in your channel to start a conversation.
+> Permission prompts appear as Allow/Deny buttons in the active thread.

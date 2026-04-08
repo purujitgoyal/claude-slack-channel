@@ -8,6 +8,7 @@ import {
   resolvedPermissions,
   saveSession,
   setActiveThreadTs,
+  setLastSeenEventTs,
 } from './session.ts';
 
 // ---------------------------------------------------------------------------
@@ -222,6 +223,13 @@ function registerBoltHandlers(mcp: Server) {
     // Top-level message (no thread) — ignore, only @mentions start threads
     if (!threadTs) return;
 
+    // Dedup gate — drop replayed or already-seen events.
+    // Slack event_ts is zero-padded "seconds.microseconds" (e.g. "1775644620.743929"),
+    // so string comparison is monotonic for timestamps in the same epoch range.
+    // If Slack ever changes the format, this assumption breaks.
+    const lastSeen = getLastSeenEventTs();
+    if (lastSeen !== null && eventTs <= lastSeen) return;
+
     const activeThreadTs = getActiveThreadTs();
 
     if (threadTs === activeThreadTs) {
@@ -242,6 +250,10 @@ function registerBoltHandlers(mcp: Server) {
         oldThreadTs: threadTs,
       });
     }
+
+    // Advance cursor only after successful forward — if forwardInboundMessage
+    // throws, the cursor stays put so recovery can retry this message.
+    setLastSeenEventTs(eventTs);
   });
 
   // App mention — starts a new thread
@@ -252,12 +264,23 @@ function registerBoltHandlers(mcp: Server) {
     const text = stripMentions(event.text ?? '');
     const eventTs = event.ts ?? '';
 
+    // Dedup gate — drop replayed or already-seen events.
+    // Slack event_ts is zero-padded "seconds.microseconds" (e.g. "1775644620.743929"),
+    // so string comparison is monotonic for timestamps in the same epoch range.
+    // If Slack ever changes the format, this assumption breaks.
+    const lastSeen = getLastSeenEventTs();
+    if (lastSeen !== null && eventTs <= lastSeen) return;
+
     await forwardInboundMessage(mcp, {
       type: 'app_mention',
       text,
       eventTs,
       userId: event.user ?? '',
     });
+
+    // Advance cursor only after successful forward — if forwardInboundMessage
+    // throws, the cursor stays put so recovery can retry this message.
+    setLastSeenEventTs(eventTs);
   });
 
   // Permission relay — receive verdict from Allow/Deny button click

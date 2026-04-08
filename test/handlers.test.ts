@@ -79,6 +79,8 @@ const { startSlack, stopSlack, getBotUserId, resetBotUserId } = await import(
 const {
   setActiveThreadTs,
   getActiveThreadTs,
+  getLastSeenEventTs,
+  setLastSeenEventTs,
   resolvedPermissions,
   pendingPermissions,
 } = await import('../src/session');
@@ -135,6 +137,7 @@ describe('Bolt Handlers', () => {
     });
 
     setActiveThreadTs(null);
+    setLastSeenEventTs(null);
     resolvedPermissions.clear();
     pendingPermissions.clear();
     mcpMock.notification.mockClear();
@@ -231,6 +234,73 @@ describe('Bolt Handlers', () => {
 
       expect(mcpMock.notification).toHaveBeenCalledTimes(1);
       expect(mcpMock.notification.mock.calls[0][0].params.content).toBe('');
+    });
+
+    // =========================================================================
+    // Dedup gate + cursor advancement — message handler
+    // =========================================================================
+
+    test('dedup gate drops replayed event_ts', async () => {
+      setActiveThreadTs('1000.0000');
+      const msg = {
+        user: TEST_ALLOWED_USER,
+        text: 'hello',
+        thread_ts: '1000.0000',
+        ts: '1000.0001',
+      };
+      await simulateMessage(msg);
+      await simulateMessage(msg); // replay same event_ts
+
+      expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+      expect(getLastSeenEventTs()).toBe('1000.0001');
+    });
+
+    test('dedup gate drops events older than cursor', async () => {
+      setLastSeenEventTs('1775644620.500000');
+      setActiveThreadTs('1000.0000');
+      await simulateMessage({
+        user: TEST_ALLOWED_USER,
+        text: 'old message',
+        thread_ts: '1000.0000',
+        ts: '1775644620.400000', // older than cursor
+      });
+
+      expect(mcpMock.notification).not.toHaveBeenCalled();
+    });
+
+    test('cursor advances after successful forward', async () => {
+      setActiveThreadTs('1000.0000');
+      const eventTs = '1775644620.999999';
+      await simulateMessage({
+        user: TEST_ALLOWED_USER,
+        text: 'unique message',
+        thread_ts: '1000.0000',
+        ts: eventTs,
+      });
+
+      expect(getLastSeenEventTs()).toBe(eventTs);
+    });
+
+    test('cursor does not advance when forward throws', async () => {
+      setActiveThreadTs('1000.0000');
+      mcpMock.notification.mockRejectedValueOnce(new Error('transport dead'));
+
+      let threw = false;
+      try {
+        await simulateMessage({
+          user: TEST_ALLOWED_USER,
+          text: 'will fail',
+          thread_ts: '1000.0000',
+          ts: '1775644621.000000',
+        });
+      } catch {
+        threw = true;
+      }
+
+      // Whether it threw or not, cursor must NOT have advanced
+      expect(getLastSeenEventTs()).toBeNull();
+      // Suppress unused variable warning — we just need to catch the rejection
+      void threw;
     });
   });
 
@@ -425,6 +495,65 @@ describe('Bolt Handlers', () => {
 
       const content = mcpMock.notification.mock.calls[0][0].params.content;
       expect(content).toBe('check this');
+    });
+
+    // =========================================================================
+    // Dedup gate + cursor advancement — app_mention handler
+    // =========================================================================
+
+    test('dedup gate drops replayed event_ts', async () => {
+      const event = {
+        user: TEST_ALLOWED_USER,
+        text: '<@BOT123> hello',
+        ts: '2000.0001',
+      };
+      await simulateAppMention(event);
+      await simulateAppMention(event); // replay same event_ts
+
+      expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+      expect(getLastSeenEventTs()).toBe('2000.0001');
+    });
+
+    test('dedup gate drops events older than cursor', async () => {
+      setLastSeenEventTs('1775644620.500000');
+      await simulateAppMention({
+        user: TEST_ALLOWED_USER,
+        text: '<@BOT123> old mention',
+        ts: '1775644620.400000', // older than cursor
+      });
+
+      expect(mcpMock.notification).not.toHaveBeenCalled();
+    });
+
+    test('cursor advances after successful forward', async () => {
+      const eventTs = '1775644621.000000';
+      await simulateAppMention({
+        user: TEST_ALLOWED_USER,
+        text: '<@BOT123> unique mention',
+        ts: eventTs,
+      });
+
+      expect(getLastSeenEventTs()).toBe(eventTs);
+    });
+
+    test('cursor does not advance when forward throws', async () => {
+      mcpMock.notification.mockRejectedValueOnce(new Error('transport dead'));
+
+      let threw = false;
+      try {
+        await simulateAppMention({
+          user: TEST_ALLOWED_USER,
+          text: '<@BOT123> will fail',
+          ts: '1775644622.000000',
+        });
+      } catch {
+        threw = true;
+      }
+
+      // Whether it threw or not, cursor must NOT have advanced
+      expect(getLastSeenEventTs()).toBeNull();
+      // Suppress unused variable warning — we just need to catch the rejection
+      void threw;
     });
   });
 

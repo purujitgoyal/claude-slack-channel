@@ -21,7 +21,9 @@
  */
 
 import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { App } from '@slack/bolt';
 
 // ---------------------------------------------------------------------------
@@ -522,4 +524,82 @@ describe.skipIf(SKIP)('Integration: Diagnostics', () => {
 
     await safeStop(app);
   }, 20_000);
+});
+
+// ---------------------------------------------------------------------------
+// Lock Conflict
+//
+// Tests that a second server process exits with code 1 when another instance
+// already holds the lock. Uses a temp lock file so this doesn't interfere
+// with any running bridge.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('Integration: Lock Conflict', () => {
+  test(
+    'second instance exits with code 1 on lock conflict',
+    async () => {
+      const tempLockPath = join(tmpdir(), `slack-channel-test-${Date.now()}.lock`);
+
+      // Inline Bun script: acquire an exclusive non-blocking flock on a given
+      // path and hold it for up to `holdMs` milliseconds, then exit 0.
+      // If flock fails (EWOULDBLOCK), exit 1.
+      const script = (lockPath: string, holdMs: number) => `
+import { dlopen, suffix } from 'bun:ffi';
+import { closeSync, openSync, writeFileSync } from 'node:fs';
+
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+const libc = dlopen(\`libc.\${suffix}\`, {
+  flock: { args: ['i32', 'i32'], returns: 'i32' },
+});
+
+const fd = openSync(${JSON.stringify(lockPath)}, 'w');
+const result = libc.symbols.flock(fd, LOCK_EX | LOCK_NB);
+if (result !== 0) {
+  closeSync(fd);
+  // Lock held by another process — exit with code 1
+  process.exit(1);
+}
+writeFileSync(${JSON.stringify(lockPath)}, String(process.pid), 'utf8');
+// Hold the lock for the requested duration, then exit cleanly
+await new Promise(r => setTimeout(r, ${holdMs}));
+closeSync(fd);
+process.exit(0);
+`;
+
+      // Spawn first process — hold lock for 5 seconds
+      const proc1 = Bun.spawn(['bun', '--eval', script(tempLockPath, 5000)], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+
+      // Give the first process a moment to acquire the lock
+      await Bun.sleep(300);
+
+      // Spawn second process — should fail immediately to acquire
+      const proc2 = Bun.spawn(['bun', '--eval', script(tempLockPath, 5000)], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+
+      // Second process should exit quickly with code 1
+      const exitCode = await Promise.race([
+        proc2.exited,
+        Bun.sleep(3000).then(() => -999), // sentinel: timeout
+      ]);
+
+      // Kill first process — it's no longer needed
+      try {
+        proc1.kill();
+      } catch {}
+
+      // Clean up temp lock file
+      try {
+        rmSync(tempLockPath, { force: true });
+      } catch {}
+
+      expect(exitCode).toBe(1);
+    },
+    15_000,
+  );
 });

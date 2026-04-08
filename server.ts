@@ -8,7 +8,11 @@ import {
   setChannelActive,
   setSlackBridge,
 } from './src/mcp.ts';
-import { saveSession, setActiveThreadTs } from './src/session.ts';
+import {
+  getLastSeenEventTs,
+  saveSession,
+  setActiveThreadTs,
+} from './src/session.ts';
 import { postThreaded, startSlack, stopSlack } from './src/slack.ts';
 
 // ---------------------------------------------------------------------------
@@ -32,7 +36,7 @@ async function activate(): Promise<void> {
   acquireLock();
 
   setActiveThreadTs(null);
-  saveSession({ threadTs: null });
+  saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
 
   const app = await startSlack({
     mcp,
@@ -76,7 +80,7 @@ mcp.oninitialized = () => {
 // ---------------------------------------------------------------------------
 
 function shutdownGracefully() {
-  if (isChannelActive()) saveSession({ threadTs: null });
+  if (isChannelActive()) saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
   releaseLock();
   stopSlack().finally(() => process.exit(0));
 }

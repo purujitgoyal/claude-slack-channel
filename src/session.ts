@@ -4,15 +4,23 @@ import { ensureChannelsDir, log, SESSION_PATH } from './config.ts';
 // ---------------------------------------------------------------------------
 // Session persistence
 // ---------------------------------------------------------------------------
-// Each Claude Code session gets its own Slack thread. threadTs is persisted to
-// disk so that mid-session tools (reply, new_thread) can find the active thread
-// after an @mention or old-thread-reply changes it. On activation, any stale
-// threadTs from a prior crash is cleared — the authoritative reset lives in
-// activate(), not cleanup(), so it runs regardless of how the previous session
-// ended. cleanup() also clears it as a belt-and-suspenders measure.
+// Persisted shape: { threadTs, lastSeenEventTs }
+//
+// threadTs — the active Slack thread for the current Claude session. Reset to
+//   null on every activation so any stale ts from a prior crash is cleared.
+//   The authoritative reset lives in activate(); cleanup() also clears it as
+//   a belt-and-suspenders measure.
+//
+// lastSeenEventTs — a Slack event_ts high-water-mark cursor used by the outage
+//   recovery path to replay missed messages. MUST NOT reset on activation —
+//   only threadTs resets. The cursor advances as inbound messages arrive and
+//   survives across sessions so recovery can pick up where the bridge left off.
 // ---------------------------------------------------------------------------
 
-export function saveSession(state: { threadTs: string | null }): void {
+export function saveSession(state: {
+  threadTs: string | null;
+  lastSeenEventTs: string | null;
+}): void {
   try {
     ensureChannelsDir();
     writeFileSync(SESSION_PATH, JSON.stringify(state), 'utf8');
@@ -37,6 +45,25 @@ export function getActiveThreadTs(): string | null {
 
 export function setActiveThreadTs(ts: string | null): void {
   activeThreadTs = ts;
+}
+
+// ---------------------------------------------------------------------------
+// lastSeenEventTs — Slack event_ts high-water-mark cursor for outage recovery
+// ---------------------------------------------------------------------------
+// Initialized to null on startup. Populated as inbound messages arrive.
+// The setter immediately persists the new cursor alongside the current
+// threadTs so the value survives process restarts.
+// ---------------------------------------------------------------------------
+
+let lastSeenEventTs: string | null = null;
+
+export function getLastSeenEventTs(): string | null {
+  return lastSeenEventTs;
+}
+
+export function setLastSeenEventTs(ts: string | null): void {
+  lastSeenEventTs = ts;
+  saveSession({ threadTs: activeThreadTs, lastSeenEventTs: ts });
 }
 
 // ---------------------------------------------------------------------------

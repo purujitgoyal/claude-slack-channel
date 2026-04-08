@@ -6,7 +6,7 @@ A Claude Code channel plugin that bridges a Slack channel to a Claude Code sessi
 - **Permission relay**: tool-use approval dialogs appear as Block Kit buttons with formatted confirmations (e.g. `Allowed — `Bash` ```git status```) — no need to watch the terminal
 - **Connection monitoring**: detects WebSocket drops, auto-reconnects, and shuts down after 2 minutes of dead connection so `/mcp` can restart cleanly
 - **Threaded**: one session = one thread. Reply in any old thread (even from a past session) to auto-start a new thread with context
-- **Lazy activation**: dormant by default — set `SLACK_CHANNEL_ACTIVATE=1` in your Claude Code `settings.json` env to enable
+- **Dev-flag activation**: dormant until you start Claude Code with `--dangerously-load-development-channels`
 - **Single-instance guard**: uses `flock(2)` to ensure only one session owns the Slack channel at a time
 - **Personal use**: only your Slack user ID can trigger messages or approve tool calls
 
@@ -84,25 +84,18 @@ chmod 700 ~/.claude/channels/slack
 chmod 600 ~/.claude/channels/slack/.env
 ```
 
-## Start
+### 7. Install plugin dependencies
 
-### 1. Activate the server
+Run `bun install` once in the plugin directory after cloning (or after the plugin is installed by Claude Code). This is a one-time step — the server no longer auto-installs on startup.
 
-Add `SLACK_CHANNEL_ACTIVATE=1` to your Claude Code `settings.json` env (either `~/.claude/settings.json` for global, or `.claude/settings.local.json` for per-project):
-
-```json
-{
-  "env": {
-    "SLACK_CHANNEL_ACTIVATE": "1"
-  }
-}
+```bash
+cd /path/to/claude-slack-channel  # or ~/.claude/plugins/slack-channel
+bun install
 ```
 
-Without this, the server stays dormant — tools are listed but inactive, no Slack connection is made.
+## Start
 
-### 2. Enable inbound messages
-
-Start Claude Code with the `--dangerously-load-development-channels` flag to allow Slack messages to reach Claude:
+Start Claude Code with the `--dangerously-load-development-channels` flag to activate the Slack channel and allow inbound messages to reach Claude:
 
 ```bash
 # If installed as a marketplace plugin:
@@ -120,7 +113,7 @@ If another session already holds the lock, activation fails with a clear error m
 
 ## Using it
 
-1. Start Claude Code with the flag and env var above
+1. Start Claude Code with the `--dangerously-load-development-channels` flag above
 2. @mention the bot in your channel (e.g. `@Claude Code Bot check on the workers`)
 3. Claude receives the message and replies in a new thread
 4. Reply in the thread to continue the conversation

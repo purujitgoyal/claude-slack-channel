@@ -2,43 +2,70 @@
  * Session State Tests
  *
  * Tests the in-memory thread state and permission tracking.
- * Disk persistence (saveSession) is verified via a writeFileSync mock
- * in the lastSeenEventTs suite; other suites test purely in-memory state.
+ * Disk persistence (saveSession) is verified by reading the actual JSON file
+ * from disk after each write; no fs mocking is used so other test files are
+ * not contaminated.
  */
 
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
-
-// ---------------------------------------------------------------------------
-// Mock node:fs so saveSession doesn't touch the real filesystem in tests.
-// The mock is hoisted — modules imported below will see these stubs.
-// ---------------------------------------------------------------------------
-
-const mockWriteFileSync = mock((_path: string, _data: string) => {});
-const mockExistsSync = mock((_path: string) => true);
-const mockMkdirSync = mock((_path: string, _opts?: any) => undefined);
-const mockReadFileSync = mock((_path: string, _enc: string) => '');
-const mockAppendFileSync = mock((_path: string, _data: string) => {});
-
-mock.module('node:fs', () => ({
-  writeFileSync: mockWriteFileSync,
-  existsSync: mockExistsSync,
-  mkdirSync: mockMkdirSync,
-  readFileSync: mockReadFileSync,
-  appendFileSync: mockAppendFileSync,
-}));
-
-const {
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from 'bun:test';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname } from 'node:path';
+import { SESSION_PATH } from '../src/config';
+import {
   getActiveThreadTs,
-  setActiveThreadTs,
   getLastSeenEventTs,
-  setLastSeenEventTs,
-  saveSession,
   resolvedPermissions,
-} = await import('../src/session');
+  saveSession,
+  setActiveThreadTs,
+  setLastSeenEventTs,
+} from '../src/session';
+
+// ---------------------------------------------------------------------------
+// Before/after hooks — back up any real session file so tests don't clobber
+// production state. The directory is guaranteed to exist (ensureChannelsDir
+// is called by saveSession itself, or we create it here for the backup step).
+// ---------------------------------------------------------------------------
+
+let backupData: string | null = null;
+const SESSION_DIR = dirname(SESSION_PATH);
+
+beforeAll(() => {
+  // Ensure the directory exists so saveSession can write into it.
+  if (!existsSync(SESSION_DIR)) {
+    mkdirSync(SESSION_DIR, { recursive: true });
+  }
+  // Back up any existing session so we can restore it after tests.
+  if (existsSync(SESSION_PATH)) {
+    backupData = readFileSync(SESSION_PATH, 'utf8');
+  }
+});
+
+afterAll(() => {
+  // Restore the original session file (or remove the one written by tests).
+  if (backupData !== null) {
+    writeFileSync(SESSION_PATH, backupData, 'utf8');
+  } else if (existsSync(SESSION_PATH)) {
+    rmSync(SESSION_PATH);
+  }
+});
 
 describe('Session State', () => {
   beforeEach(() => {
     setActiveThreadTs(null);
+    setLastSeenEventTs(null);
     resolvedPermissions.clear();
   });
 
@@ -112,7 +139,6 @@ describe('Session State', () => {
 
   describe('lastSeenEventTs', () => {
     beforeEach(() => {
-      mockWriteFileSync.mockClear();
       setLastSeenEventTs(null);
     });
 
@@ -129,11 +155,7 @@ describe('Session State', () => {
       setActiveThreadTs('1000.0000');
       setLastSeenEventTs('1775644620.743929');
 
-      expect(mockWriteFileSync).toHaveBeenCalled();
-      const writtenData = mockWriteFileSync.mock.calls[
-        mockWriteFileSync.mock.calls.length - 1
-      ][1] as string;
-      const parsed = JSON.parse(writtenData);
+      const parsed = JSON.parse(readFileSync(SESSION_PATH, 'utf8'));
       expect(parsed).toEqual({
         threadTs: '1000.0000',
         lastSeenEventTs: '1775644620.743929',
@@ -144,10 +166,7 @@ describe('Session State', () => {
       setActiveThreadTs(null);
       setLastSeenEventTs('1775644620.743929');
 
-      const writtenData = mockWriteFileSync.mock.calls[
-        mockWriteFileSync.mock.calls.length - 1
-      ][1] as string;
-      const parsed = JSON.parse(writtenData);
+      const parsed = JSON.parse(readFileSync(SESSION_PATH, 'utf8'));
       expect(parsed).toEqual({
         threadTs: null,
         lastSeenEventTs: '1775644620.743929',
@@ -160,10 +179,7 @@ describe('Session State', () => {
       // Activation resets threadTs but must preserve lastSeenEventTs
       saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
 
-      const writtenData = mockWriteFileSync.mock.calls[
-        mockWriteFileSync.mock.calls.length - 1
-      ][1] as string;
-      const parsed = JSON.parse(writtenData);
+      const parsed = JSON.parse(readFileSync(SESSION_PATH, 'utf8'));
       expect(parsed.lastSeenEventTs).toBe('1775644620.743929');
       expect(parsed.threadTs).toBeNull();
     });

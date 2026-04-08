@@ -524,6 +524,145 @@ export async function startSlack(opts: {
   return bolt;
 }
 
+// ---------------------------------------------------------------------------
+// recoverMissedMessages — fetch and forward messages missed during an outage
+// ---------------------------------------------------------------------------
+// Called on reconnect when outageMs >= RECOVERY_THRESHOLD. Fetches channel
+// history (for @mentions) and active thread replies (if any) since the given
+// cursor timestamp. Filters, dedupes, sorts ascending, and forwards each via
+// forwardInboundMessage. Returns a count of successfully forwarded messages.
+//
+// This is best-effort: Slack API errors are caught and returned as { error }.
+// Per-message forward failures do not abort the loop; the cursor is only
+// advanced after a successful forward so the next recovery pass can retry.
+//
+// Cursor ordering note: Slack event_ts is zero-padded "seconds.microseconds"
+// (e.g. "1775644620.743929"). String comparison is monotonic for these values
+// in the same epoch range. If Slack ever changes the format, this breaks.
+// ---------------------------------------------------------------------------
+
+export async function recoverMissedMessages(
+  mcp: Server,
+  sinceTs: string | null,
+): Promise<{ recovered: number; error?: string }> {
+  if (!bolt) return { recovered: 0 };
+
+  // Compute oldest: use sinceTs if available, otherwise cap at now - 3600s
+  const oldest = sinceTs ?? String((Date.now() / 1000 - 3600).toFixed(6));
+
+  let historyMessages: any[] = [];
+  let repliesMessages: any[] = [];
+  let apiError: string | undefined;
+
+  // Fetch channel history for @mentions
+  try {
+    const result = await bolt.client.conversations.history({
+      channel: channelId,
+      oldest,
+      limit: 100,
+    });
+    historyMessages = result.messages ?? [];
+  } catch (err: any) {
+    const msg = err?.message ?? String(err);
+    log(`recoverMissedMessages: conversations.history failed: ${msg}`);
+    return { recovered: 0, error: msg };
+  }
+
+  // Fetch active thread replies (if any)
+  const activeThreadTs = getActiveThreadTs();
+  if (activeThreadTs) {
+    try {
+      const result = await bolt.client.conversations.replies({
+        channel: channelId,
+        ts: activeThreadTs,
+        oldest,
+        limit: 100,
+      });
+      repliesMessages = result.messages ?? [];
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      log(`recoverMissedMessages: conversations.replies failed: ${msg}`);
+      apiError = msg;
+      // Continue with whatever history we got — partial recovery is better than none
+    }
+  }
+
+  // Filter history: keep only messages from the allowed user that mention the bot
+  const mentionFilter = botUserId
+    ? (msg: any) =>
+        msg.user === allowedUserId &&
+        (msg.text ?? '').includes(`<@${botUserId}>`)
+    : (msg: any) => msg.user === allowedUserId;
+  const mentions = historyMessages.filter(mentionFilter);
+
+  // Filter replies: keep only replies from the allowed user in the active thread
+  // (exclude the parent message itself — ts === thread_ts is the parent)
+  const replies = activeThreadTs
+    ? repliesMessages.filter(
+        (msg: any) =>
+          msg.user === allowedUserId &&
+          msg.thread_ts === activeThreadTs &&
+          msg.ts !== activeThreadTs,
+      )
+    : [];
+
+  // Combine, drop already-seen events, sort ascending by ts
+  const all = [...mentions, ...replies];
+  const unseen = sinceTs
+    ? all.filter((msg: any) => (msg.ts ?? '') > sinceTs)
+    : all;
+  unseen.sort((a: any, b: any) => {
+    const ta: string = a.ts ?? '';
+    const tb: string = b.ts ?? '';
+    if (ta < tb) return -1;
+    if (ta > tb) return 1;
+    return 0;
+  });
+
+  let recoveredCount = 0;
+
+  for (const msg of unseen) {
+    const ts: string = msg.ts ?? '';
+    const text: string = msg.text ?? '';
+    const userId: string = msg.user ?? '';
+
+    // Skip bot's own messages
+    if (botUserId && userId === botUserId) continue;
+
+    try {
+      // Classify: thread_reply if in the active thread; app_mention otherwise
+      if (activeThreadTs && msg.thread_ts === activeThreadTs) {
+        await forwardInboundMessage(mcp, {
+          type: 'thread_reply',
+          text,
+          eventTs: ts,
+          userId,
+        });
+      } else {
+        await forwardInboundMessage(mcp, {
+          type: 'app_mention',
+          text,
+          eventTs: ts,
+          userId,
+        });
+      }
+      setLastSeenEventTs(ts);
+      recoveredCount++;
+    } catch (err: any) {
+      log(
+        `recoverMissedMessages: failed to forward message ${ts}: ${err?.message ?? err}`,
+      );
+      // Do not advance cursor — leave it for retry on next recovery pass
+    }
+  }
+
+  const result: { recovered: number; error?: string } = {
+    recovered: recoveredCount,
+  };
+  if (apiError !== undefined) result.error = apiError;
+  return result;
+}
+
 export async function stopSlack(): Promise<void> {
   if (bolt) {
     cleanupMonitor?.();

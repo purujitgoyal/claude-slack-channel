@@ -5,13 +5,13 @@
  * on the Slack Bolt App. These handle the inbound Slack → Claude message relay.
  */
 
-import { mock, describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
-  TEST_CHANNEL_ID,
   TEST_ALLOWED_USER,
-  TEST_OTHER_USER,
-  TEST_BOT_TOKEN,
   TEST_APP_TOKEN,
+  TEST_BOT_TOKEN,
+  TEST_CHANNEL_ID,
+  TEST_OTHER_USER,
 } from './helpers';
 
 // ---------------------------------------------------------------------------
@@ -39,6 +39,9 @@ mock.module('@slack/bolt', () => {
               { text: 'response from bot', bot_id: 'B123' },
             ],
           })),
+        },
+        auth: {
+          test: mock(async () => ({ ok: true, user_id: 'U_BOT_DEFAULT' })),
         },
         reactions: { add: mock(async () => ({ ok: true })) },
       };
@@ -70,7 +73,9 @@ mock.module('@slack/bolt', () => {
 // Import modules under test
 // ---------------------------------------------------------------------------
 
-const { startSlack, stopSlack } = await import('../src/slack');
+const { startSlack, stopSlack, getBotUserId, resetBotUserId } = await import(
+  '../src/slack'
+);
 const {
   setActiveThreadTs,
   getActiveThreadTs,
@@ -137,6 +142,7 @@ describe('Bolt Handlers', () => {
 
   afterEach(async () => {
     await stopSlack();
+    resetBotUserId();
   });
 
   // =========================================================================
@@ -572,7 +578,8 @@ describe('Bolt Handlers', () => {
       // Command preview is in a separate code block within blocks array
       const call = payload.client.chat.update.mock.calls[0][0];
       const codeBlock = call.blocks.find(
-        (b: any) => b.type === 'section' && b.text?.text?.includes('git status'),
+        (b: any) =>
+          b.type === 'section' && b.text?.text?.includes('git status'),
       );
       expect(codeBlock).toBeDefined();
       expect(codeBlock.text.text).toContain('```');
@@ -617,6 +624,56 @@ describe('Bolt Handlers', () => {
 
       expect(mcpMock.notification).toHaveBeenCalledTimes(2);
       expect(retry.client.chat.update).toHaveBeenCalled();
+    });
+  });
+
+  // =========================================================================
+  // Bot User ID Capture
+  // =========================================================================
+
+  describe('bot user ID capture', () => {
+    test('captures bot user ID at startup', async () => {
+      // beforeEach already called startSlack; auth.test defaults to U_BOT_DEFAULT.
+      expect(getBotUserId()).toBe('U_BOT_DEFAULT');
+    });
+
+    test('tolerates auth.test failure', async () => {
+      // Stop the app started by beforeEach and reset state.
+      await stopSlack();
+      resetBotUserId();
+
+      const errorSpy = mock((..._args: any[]) => {});
+      const origError = console.error;
+      console.error = errorSpy;
+
+      // startSlack synchronously calls `new App()` (pushing to apps[]) then hits
+      // `await bolt.start()` — at that await point control returns here, so we can
+      // safely patch auth.test on the new app before the microtask resumes.
+      const startPromise = startSlack({
+        mcp: mcpMock as any,
+        botToken: TEST_BOT_TOKEN,
+        appToken: TEST_APP_TOKEN,
+        channelId: TEST_CHANNEL_ID,
+        allowedUserId: TEST_ALLOWED_USER,
+        onDead: () => {},
+      });
+
+      // Patch auth.test on the newly-constructed MockApp to reject.
+      const newApp = apps[apps.length - 1];
+      newApp.client.auth.test.mockRejectedValueOnce(new Error('invalid_auth'));
+
+      await startPromise;
+
+      console.error = origError;
+
+      // startSlack must not throw — botUserId remains null
+      expect(getBotUserId()).toBeNull();
+
+      // A log message mentioning the failure must have been emitted
+      const logged = errorSpy.mock.calls.some((call: any[]) =>
+        String(call[0]).includes('bot user ID'),
+      );
+      expect(logged).toBe(true);
     });
   });
 });

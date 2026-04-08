@@ -17,6 +17,21 @@ let bolt: App | null = null;
 let channelId = '';
 let allowedUserId = '';
 let cleanupMonitor: (() => void) | null = null;
+let botUserId: string | null = null;
+
+// ---------------------------------------------------------------------------
+// Bot user ID accessors
+// ---------------------------------------------------------------------------
+
+/** Returns the bot user ID captured at startup, or null if not yet known. */
+export function getBotUserId(): string | null {
+  return botUserId;
+}
+
+/** Resets botUserId to null — test-only, used in afterEach to prevent cross-test state leakage. */
+export function resetBotUserId(): void {
+  botUserId = null;
+}
 
 // ---------------------------------------------------------------------------
 // Threading helper — posts a message, starting or continuing a thread
@@ -409,6 +424,15 @@ export async function startSlack(opts: {
   registerBoltHandlers(opts.mcp);
   await bolt.start();
   log('Bolt Socket Mode connected');
+
+  // Capture bot user ID for use by recovery filtering (T10).
+  // Wrapped in try/catch so a failure here does not abort startup.
+  try {
+    const authResult = await bolt.client.auth.test();
+    botUserId = authResult.user_id ?? null;
+  } catch (err) {
+    log(`failed to capture bot user ID: ${err}`);
+  }
 
   cleanupMonitor = monitorConnection(opts.mcp, opts.channelId, opts.onDead);
 

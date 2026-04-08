@@ -254,6 +254,7 @@ function registerBoltHandlers(mcp: Server) {
 
 export const OUTAGE_THRESHOLD = 10_000; // 10s — only notify if disconnect lasts longer than this
 export const RECONNECT_DEBOUNCE = 5_000; // 5s — wait for connection to stabilize after reconnect
+export const RECOVERY_THRESHOLD = 60_000; // 60s — only fetch history on reconnect if outage exceeded this
 
 function monitorConnection(
   mcp: Server,
@@ -267,11 +268,17 @@ function monitorConnection(
   let connected = false;
   let notifiedDisconnect = false;
   let stopped = false;
+  let disconnectedAt: number | null = null;
   let diagCloseListener: ((code: number, reason: Buffer) => void) | null = null;
 
   socketClient.on('disconnected', () => {
     if (stopped) return;
     log('Socket Mode disconnected');
+
+    // Record the first disconnection time — don't overwrite on repeated disconnected events
+    if (disconnectedAt === null) {
+      disconnectedAt = Date.now();
+    }
 
     // Cancel any pending "restored" notification — connection didn't stabilize
     if (reconnectNotifyTimer) {
@@ -346,6 +353,7 @@ function monitorConnection(
           },
         })
         .catch(() => {});
+      disconnectedAt = null;
     }, RECONNECT_DEBOUNCE);
     reconnectNotifyTimer.unref();
   });

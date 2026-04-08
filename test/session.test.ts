@@ -6,7 +6,7 @@
  * in the lastSeenEventTs suite; other suites test purely in-memory state.
  */
 
-import { mock, describe, test, expect, beforeEach } from 'bun:test';
+import { beforeEach, describe, expect, mock, test } from 'bun:test';
 
 // ---------------------------------------------------------------------------
 // Mock node:fs so saveSession doesn't touch the real filesystem in tests.
@@ -130,18 +130,28 @@ describe('Session State', () => {
       setLastSeenEventTs('1775644620.743929');
 
       expect(mockWriteFileSync).toHaveBeenCalled();
-      const writtenData = mockWriteFileSync.mock.calls[mockWriteFileSync.mock.calls.length - 1][1] as string;
+      const writtenData = mockWriteFileSync.mock.calls[
+        mockWriteFileSync.mock.calls.length - 1
+      ][1] as string;
       const parsed = JSON.parse(writtenData);
-      expect(parsed).toEqual({ threadTs: '1000.0000', lastSeenEventTs: '1775644620.743929' });
+      expect(parsed).toEqual({
+        threadTs: '1000.0000',
+        lastSeenEventTs: '1775644620.743929',
+      });
     });
 
     test('setter preserves current threadTs in saveSession call', () => {
       setActiveThreadTs(null);
       setLastSeenEventTs('1775644620.743929');
 
-      const writtenData = mockWriteFileSync.mock.calls[mockWriteFileSync.mock.calls.length - 1][1] as string;
+      const writtenData = mockWriteFileSync.mock.calls[
+        mockWriteFileSync.mock.calls.length - 1
+      ][1] as string;
       const parsed = JSON.parse(writtenData);
-      expect(parsed).toEqual({ threadTs: null, lastSeenEventTs: '1775644620.743929' });
+      expect(parsed).toEqual({
+        threadTs: null,
+        lastSeenEventTs: '1775644620.743929',
+      });
     });
 
     test('cursor persists across threadTs reset (does NOT reset on activation path)', () => {
@@ -150,7 +160,9 @@ describe('Session State', () => {
       // Activation resets threadTs but must preserve lastSeenEventTs
       saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
 
-      const writtenData = mockWriteFileSync.mock.calls[mockWriteFileSync.mock.calls.length - 1][1] as string;
+      const writtenData = mockWriteFileSync.mock.calls[
+        mockWriteFileSync.mock.calls.length - 1
+      ][1] as string;
       const parsed = JSON.parse(writtenData);
       expect(parsed.lastSeenEventTs).toBe('1775644620.743929');
       expect(parsed.threadTs).toBeNull();

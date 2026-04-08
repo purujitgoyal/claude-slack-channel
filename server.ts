@@ -80,7 +80,8 @@ mcp.oninitialized = () => {
 // ---------------------------------------------------------------------------
 
 function shutdownGracefully() {
-  if (isChannelActive()) saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
+  if (isChannelActive())
+    saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
   releaseLock();
   stopSlack().finally(() => process.exit(0));
 }

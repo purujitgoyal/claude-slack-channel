@@ -27,6 +27,48 @@ export function resetShuttingDown(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Parent-PID watchdog — detects orphaned bridge processes
+//
+// Testability seam: tests reassign getPpid to return 1 (orphaned).
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the current parent process ID. Reassignable in tests via
+ * `serverModule.getPpid = () => 1` (Bun allows live-binding writes on namespace).
+ */
+export let getPpid: () => number = () => process.ppid;
+
+/** Override getPpid for testing — exported for test cleanup only. */
+export function setGetPpid(fn: () => number): void {
+  getPpid = fn;
+}
+
+/** Reset the watchdog interval handle — exported for test cleanup only. */
+export function resetWatchdog(): void {
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
+  }
+  getPpid = () => process.ppid;
+}
+
+let watchdogInterval: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Start the parent-PID watchdog. Called inside activate() after acquireLock().
+ * On macOS/Linux, when a parent process dies the OS reparents the child to
+ * pid 1 (init/launchd). We use ppid === 1 as the orphan signal.
+ */
+export function startWatchdog(): void {
+  watchdogInterval = setInterval(() => {
+    if (getPpid() === 1) {
+      shutdownGracefully();
+    }
+  }, 5000);
+  watchdogInterval.unref();
+}
+
+// ---------------------------------------------------------------------------
 // Lazy activation — only when client negotiates claude/channel support
 // ---------------------------------------------------------------------------
 
@@ -45,6 +87,7 @@ async function activate(): Promise<void> {
   }
 
   acquireLock();
+  startWatchdog();
 
   setActiveThreadTs(null);
   saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
@@ -94,6 +137,12 @@ export function shutdownGracefully(): void {
   // Idempotent: racing SIGTERM + SIGINT + stdin-close must not double-release
   if (shuttingDown) return;
   shuttingDown = true;
+
+  // Clear the watchdog interval so it stops firing during/after shutdown.
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
+  }
 
   // Safety net: if stopSlack() hangs, force-exit after 3 s.
   // .unref() prevents this timer from keeping the event loop alive on its own.

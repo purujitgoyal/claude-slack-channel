@@ -83,7 +83,13 @@ mock.module('@slack/bolt', () => {
 // ---------------------------------------------------------------------------
 
 const { startSlack, stopSlack } = await import('../src/slack');
-const { shutdownGracefully, resetShuttingDown } = await import('../server');
+const {
+  shutdownGracefully,
+  resetShuttingDown,
+  startWatchdog,
+  setGetPpid,
+  resetWatchdog,
+} = await import('../server');
 
 // ---------------------------------------------------------------------------
 // Test suite
@@ -673,5 +679,120 @@ describe('shutdownGracefully', () => {
 
     expect(capturedHandle).not.toBeNull();
     expect(capturedHandle.unref).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parent-PID watchdog
+// ---------------------------------------------------------------------------
+
+describe('watchdog', () => {
+  let origExit: typeof process.exit;
+  const exitMock = mock((_code?: number) => {});
+  const timers = new FakeTimers();
+  // setInterval/clearInterval originals — we replace them per test
+  let origSetInterval: typeof globalThis.setInterval;
+  let origClearInterval: typeof globalThis.clearInterval;
+
+  beforeEach(async () => {
+    resetShuttingDown();
+    resetWatchdog();
+    origExit = process.exit;
+    (process as any).exit = exitMock;
+    exitMock.mockClear();
+    releaseLockMock.mockClear();
+    acquireLockMock.mockClear();
+    timers.install();
+    origSetInterval = globalThis.setInterval;
+    origClearInterval = globalThis.clearInterval;
+    // Ensure a bolt instance exists so stopSlack() has something to call
+    apps.length = 0;
+    await startSlack({
+      mcp: { notification: mock(async () => {}) } as any,
+      botToken: TEST_BOT_TOKEN,
+      appToken: TEST_APP_TOKEN,
+      channelId: TEST_CHANNEL_ID,
+      allowedUserId: TEST_ALLOWED_USER,
+      onDead: mock(() => {}),
+    });
+  });
+
+  afterEach(async () => {
+    // Restore setInterval/clearInterval in case a test replaced them
+    globalThis.setInterval = origSetInterval;
+    globalThis.clearInterval = origClearInterval;
+    timers.uninstall();
+    (process as any).exit = origExit;
+    resetWatchdog();
+    resetShuttingDown();
+    const currentApp = apps[apps.length - 1];
+    if (currentApp) {
+      currentApp.stop.mockImplementation(async () => {});
+    }
+    try {
+      await stopSlack();
+    } catch {
+      // ignore — bolt may already be stopped
+    }
+  });
+
+  test('watchdog triggers shutdown when orphaned', () => {
+    // Capture the interval callback so we can fire it manually
+    let capturedCallback: (() => void) | null = null;
+    (globalThis as any).setInterval = (cb: () => void, _delay: number) => {
+      capturedCallback = cb;
+      return { unref() {} };
+    };
+
+    // Stub getPpid to return 1 (orphaned — OS reparented to init/launchd)
+    setGetPpid(() => 1);
+
+    startWatchdog();
+
+    expect(capturedCallback).not.toBeNull();
+    expect(releaseLockMock).not.toHaveBeenCalled();
+
+    // Fire the interval callback — should trigger shutdownGracefully
+    capturedCallback!();
+
+    // shutdownGracefully must have run: releaseLock is called exactly once
+    expect(releaseLockMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("watchdog interval is unref'd", () => {
+    // Capture the interval handle to spy on .unref()
+    let capturedHandle: any = null;
+    (globalThis as any).setInterval = (_cb: () => void, _delay: number) => {
+      const handle = { unref: mock(() => {}) };
+      if (capturedHandle === null) capturedHandle = handle;
+      return handle;
+    };
+
+    startWatchdog();
+
+    expect(capturedHandle).not.toBeNull();
+    expect(capturedHandle.unref).toHaveBeenCalledTimes(1);
+  });
+
+  test('watchdog is cleared on shutdown', () => {
+    // Capture handle and spy on clearInterval
+    let capturedHandle: any = null;
+    let clearedHandle: any = null;
+
+    (globalThis as any).setInterval = (_cb: () => void, _delay: number) => {
+      capturedHandle = { unref() {} };
+      return capturedHandle;
+    };
+    (globalThis as any).clearInterval = (handle: any) => {
+      clearedHandle = handle;
+    };
+
+    startWatchdog();
+    expect(capturedHandle).not.toBeNull();
+
+    shutdownGracefully();
+
+    // clearInterval must have been called with the watchdog handle
+    expect(clearedHandle).toBe(capturedHandle);
   });
 });

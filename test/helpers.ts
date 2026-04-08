@@ -70,7 +70,7 @@ export class FakeTimers {
 // Constants
 // ---------------------------------------------------------------------------
 
-export { HEALTH_TIMEOUT, OUTAGE_THRESHOLD, RECONNECT_DEBOUNCE } from '../src/slack.ts';
+export { OUTAGE_THRESHOLD, RECONNECT_DEBOUNCE } from '../src/slack.ts';
 
 export const TEST_CHANNEL_ID = 'C_TEST';
 export const TEST_ALLOWED_USER = 'U_ALLOWED';

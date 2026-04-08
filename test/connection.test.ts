@@ -1,17 +1,14 @@
 /**
  * Connection Monitoring Tests
  *
- * Tests the Socket Mode connection lifecycle — disconnect detection, health
- * timeouts, reconnection, and graceful shutdown. This is the most critical
+ * Tests the Socket Mode connection lifecycle — disconnect detection,
+ * reconnection, and graceful shutdown. This is the most critical
  * test file because connection instability is the primary reliability issue.
- *
- * KEY BUG DOCUMENTED: Leaked health timeouts on rapid disconnect events.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
   FakeTimers,
-  HEALTH_TIMEOUT,
   OUTAGE_THRESHOLD,
   RECONNECT_DEBOUNCE,
   TEST_ALLOWED_USER,
@@ -156,13 +153,6 @@ describe('Connection Monitoring', () => {
   // =========================================================================
 
   describe('disconnected event', () => {
-    test('starts health-check timeout and disconnect notify timer', () => {
-      expect(timers.pending).toBe(0);
-      app.socketClient.emit('disconnected');
-      // healthTimeout + disconnectNotifyTimer
-      expect(timers.pending).toBe(2);
-    });
-
     test('sends disconnect notification after OUTAGE_THRESHOLD', async () => {
       app.socketClient.emit('disconnected');
       // Not sent immediately — delayed by OUTAGE_THRESHOLD
@@ -191,7 +181,7 @@ describe('Connection Monitoring', () => {
       mcpMock.notification.mockRejectedValue(new Error('transport dead'));
       app.socketClient.emit('disconnected');
       await timers.tick(OUTAGE_THRESHOLD);
-      expect(onDead).not.toHaveBeenCalled(); // only health timeout triggers onDead
+      expect(onDead).not.toHaveBeenCalled();
     });
   });
 
@@ -200,9 +190,9 @@ describe('Connection Monitoring', () => {
   // =========================================================================
 
   describe('connected event', () => {
-    test('clears health timeout and disconnect notify timer', () => {
+    test('clears disconnect notify timer on reconnect', () => {
       app.socketClient.emit('disconnected');
-      expect(timers.pending).toBe(2);
+      expect(timers.pending).toBe(1);
       app.socketClient.emit('connected');
       expect(timers.pending).toBe(0);
     });
@@ -260,9 +250,9 @@ describe('Connection Monitoring', () => {
   describe('reconnecting event', () => {
     test('does not affect pending timers', () => {
       app.socketClient.emit('disconnected');
-      expect(timers.pending).toBe(2);
+      expect(timers.pending).toBe(1);
       app.socketClient.emit('reconnecting');
-      expect(timers.pending).toBe(2);
+      expect(timers.pending).toBe(1);
     });
 
     test('does not call onDead', () => {
@@ -288,9 +278,9 @@ describe('Connection Monitoring', () => {
 
     test('does not affect pending timers', () => {
       app.socketClient.emit('disconnected');
-      expect(timers.pending).toBe(2);
+      expect(timers.pending).toBe(1);
       app.socketClient.emit('error', new Error('transient'));
-      expect(timers.pending).toBe(2);
+      expect(timers.pending).toBe(1);
     });
 
     test('does not send MCP notification', () => {
@@ -326,14 +316,6 @@ describe('Connection Monitoring', () => {
   // =========================================================================
 
   describe('disconnect → reconnect cycle', () => {
-    test('reconnect within timeout window prevents onDead', async () => {
-      app.socketClient.emit('disconnected');
-      await timers.tick(60_000); // 60s — well within 120s window
-      app.socketClient.emit('connected');
-      await timers.tick(HEALTH_TIMEOUT); // past the original deadline
-      expect(onDead).not.toHaveBeenCalled();
-    });
-
     test('sends both notifications in correct order when disconnect exceeds threshold', async () => {
       app.socketClient.emit('disconnected');
       // Wait for disconnect notification to fire
@@ -359,7 +341,7 @@ describe('Connection Monitoring', () => {
       expect(mcpMock.notification).not.toHaveBeenCalled();
     });
 
-    test('repeated clean cycles do not accumulate timeouts', async () => {
+    test('repeated clean cycles do not accumulate timers', async () => {
       for (let i = 0; i < 5; i++) {
         app.socketClient.emit('disconnected');
         await timers.tick(OUTAGE_THRESHOLD + 1); // let disconnect notification fire
@@ -367,55 +349,6 @@ describe('Connection Monitoring', () => {
         await timers.tick(RECONNECT_DEBOUNCE); // let reconnect notification fire
       }
       expect(timers.pending).toBe(0);
-      await timers.tick(HEALTH_TIMEOUT * 2);
-      expect(onDead).not.toHaveBeenCalled();
-    });
-
-    test('reconnect at the exact timeout boundary prevents onDead', async () => {
-      app.socketClient.emit('disconnected');
-      await timers.tick(HEALTH_TIMEOUT - 1);
-      app.socketClient.emit('connected');
-      await timers.tick(1);
-      expect(onDead).not.toHaveBeenCalled();
-    });
-  });
-
-  // =========================================================================
-  // Disconnect → Timeout Expiry (Shutdown Path)
-  // =========================================================================
-
-  describe('disconnect → timeout expiry', () => {
-    test('calls onDead after HEALTH_TIMEOUT (120s)', async () => {
-      app.socketClient.emit('disconnected');
-      expect(onDead).not.toHaveBeenCalled();
-      await timers.tick(HEALTH_TIMEOUT);
-      expect(onDead).toHaveBeenCalledTimes(1);
-    });
-
-    test('does NOT call onDead before HEALTH_TIMEOUT', async () => {
-      app.socketClient.emit('disconnected');
-      await timers.tick(HEALTH_TIMEOUT - 1);
-      expect(onDead).not.toHaveBeenCalled();
-    });
-
-    test('sends shutdown notification before calling onDead', async () => {
-      app.socketClient.emit('disconnected');
-      mcpMock.notification.mockClear();
-
-      await timers.tick(HEALTH_TIMEOUT);
-
-      const shutdownCall = mcpMock.notification.mock.calls.find((c: any) =>
-        c[0]?.params?.content?.includes('dead'),
-      );
-      expect(shutdownCall).toBeTruthy();
-      expect(onDead).toHaveBeenCalled();
-    });
-
-    test('onDead still called even if shutdown notification throws', async () => {
-      mcpMock.notification.mockRejectedValue(new Error('MCP transport gone'));
-      app.socketClient.emit('disconnected');
-      await timers.tick(HEALTH_TIMEOUT);
-      expect(onDead).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -426,36 +359,30 @@ describe('Connection Monitoring', () => {
   describe('graceful shutdown', () => {
     test('stopSlack clears all pending timers', async () => {
       app.socketClient.emit('disconnected');
-      expect(timers.pending).toBe(2); // health + disconnect notify
+      expect(timers.pending).toBe(1); // disconnectNotifyTimer
 
       await stopSlack();
 
       expect(timers.pending).toBe(0);
-      await timers.tick(HEALTH_TIMEOUT);
       expect(onDead).not.toHaveBeenCalled();
     });
   });
 
   // =========================================================================
-  // FIXED: Rapid Disconnects — No Leaked Health Timeouts
+  // Rapid Disconnects — No Leaked Timers
   // =========================================================================
 
-  describe('rapid disconnects — no leaked timeouts (FIXED)', () => {
+  describe('rapid disconnects — no leaked timers', () => {
     /*
-     * Previously, rapid disconnect events leaked health timeouts because the
-     * handler created a new setTimeout without clearing the previous one.
-     * Now the handler clears any existing timeout first.
-     *
-     * Each disconnect creates 2 timers: healthTimeout + disconnectNotifyTimer.
-     * Rapid disconnects should replace the health timeout and keep the same
-     * disconnect notify timer (only one is created if none pending).
+     * Rapid disconnect events must not leak timers because the handler
+     * clears the disconnectNotifyTimer before creating a new one.
      */
 
-    test('second disconnect replaces health timeout (only 2 pending)', () => {
+    test('second disconnect keeps only one pending timer', () => {
       app.socketClient.emit('disconnected');
-      expect(timers.pending).toBe(2); // health + disconnect notify
+      expect(timers.pending).toBe(1); // disconnectNotifyTimer
       app.socketClient.emit('disconnected');
-      expect(timers.pending).toBe(2); // replaced health, same disconnect notify
+      expect(timers.pending).toBe(1); // same single timer
     });
 
     test('reconnect after rapid disconnects clears all timers', async () => {
@@ -464,40 +391,35 @@ describe('Connection Monitoring', () => {
       app.socketClient.emit('connected');
 
       expect(timers.pending).toBe(0);
-
-      await timers.tick(HEALTH_TIMEOUT);
       expect(onDead).not.toHaveBeenCalled();
     });
 
-    test('rapid disconnect flurry still results in only two timers', () => {
+    test('rapid disconnect flurry still results in only one timer', () => {
       app.socketClient.emit('disconnected');
       app.socketClient.emit('disconnected');
       app.socketClient.emit('disconnected');
 
-      expect(timers.pending).toBe(2); // health + disconnect notify
+      expect(timers.pending).toBe(1); // disconnectNotifyTimer only
     });
 
-    test('reconnect after flurry prevents false shutdown', async () => {
+    test('reconnect after flurry clears all timers', async () => {
       app.socketClient.emit('disconnected');
       app.socketClient.emit('disconnected');
       app.socketClient.emit('disconnected');
       app.socketClient.emit('connected');
 
       expect(timers.pending).toBe(0);
-      await timers.tick(HEALTH_TIMEOUT * 2);
       expect(onDead).not.toHaveBeenCalled();
     });
 
-    test('disconnect burst → reconnect → disconnect still works correctly', async () => {
+    test('disconnect burst → reconnect → disconnect still tracks timer correctly', async () => {
       app.socketClient.emit('disconnected');
       app.socketClient.emit('disconnected');
       app.socketClient.emit('connected');
       expect(timers.pending).toBe(0);
 
       app.socketClient.emit('disconnected');
-      expect(timers.pending).toBe(2); // health + disconnect notify
-      await timers.tick(HEALTH_TIMEOUT);
-      expect(onDead).toHaveBeenCalledTimes(1);
+      expect(timers.pending).toBe(1); // disconnectNotifyTimer
     });
   });
 
@@ -506,41 +428,36 @@ describe('Connection Monitoring', () => {
   // =========================================================================
 
   describe('complex scenarios', () => {
-    test('error during disconnect phase does not interfere with timers', async () => {
+    test('error during disconnect phase does not interfere with timers', () => {
       app.socketClient.emit('disconnected');
       app.socketClient.emit('error', new Error('transient'));
-      expect(timers.pending).toBe(2); // health + disconnect notify
-      await timers.tick(HEALTH_TIMEOUT);
-      expect(onDead).toHaveBeenCalledTimes(1);
+      expect(timers.pending).toBe(1); // disconnectNotifyTimer only
     });
 
-    test('reconnecting event does NOT clear timers', async () => {
+    test('reconnecting event does NOT clear timers', () => {
       app.socketClient.emit('disconnected');
       app.socketClient.emit('reconnecting');
-      expect(timers.pending).toBe(2); // health + disconnect notify
-      await timers.tick(HEALTH_TIMEOUT);
-      expect(onDead).toHaveBeenCalledTimes(1);
+      expect(timers.pending).toBe(1); // disconnectNotifyTimer only
     });
 
-    test('disconnect → reconnect → disconnect → timeout', async () => {
+    test('disconnect → reconnect → disconnect resets timer correctly', async () => {
       app.socketClient.emit('disconnected');
       app.socketClient.emit('connected');
       expect(timers.pending).toBe(0);
 
       app.socketClient.emit('disconnected');
-      await timers.tick(HEALTH_TIMEOUT);
-      expect(onDead).toHaveBeenCalledTimes(1);
+      expect(timers.pending).toBe(1); // new disconnectNotifyTimer
     });
 
     test('unable_to_socket_mode_start during active disconnect timer', () => {
       app.socketClient.emit('disconnected');
-      expect(timers.pending).toBe(2); // health + disconnect notify
+      expect(timers.pending).toBe(1); // disconnectNotifyTimer
       app.socketClient.emit('unable_to_socket_mode_start');
       // onDead called immediately by unable_to_socket_mode_start
       expect(onDead).toHaveBeenCalledTimes(1);
       // Note: timers are NOT cleared — they would fire later too
       // This is a secondary concern (process exits on first onDead anyway)
-      expect(timers.pending).toBe(2);
+      expect(timers.pending).toBe(1);
     });
 
     test('connected after unable_to_socket_mode_start', () => {
@@ -551,7 +468,7 @@ describe('Connection Monitoring', () => {
       expect(onDead).toHaveBeenCalledTimes(1); // no additional call
     });
 
-    test('alternating disconnect/error/reconnect sequence', async () => {
+    test('alternating disconnect/error/reconnect sequence clears all timers', () => {
       app.socketClient.emit('disconnected');
       app.socketClient.emit('error', new Error('e1'));
       app.socketClient.emit('reconnecting');
@@ -559,7 +476,6 @@ describe('Connection Monitoring', () => {
       app.socketClient.emit('connected');
 
       expect(timers.pending).toBe(0);
-      await timers.tick(HEALTH_TIMEOUT);
       expect(onDead).not.toHaveBeenCalled();
     });
 

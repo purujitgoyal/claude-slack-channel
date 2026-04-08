@@ -249,11 +249,9 @@ function registerBoltHandlers(mcp: Server) {
 }
 
 // ---------------------------------------------------------------------------
-// Connection monitoring — logs lifecycle events, notifies Claude, shuts down
-// on prolonged disconnect
+// Connection monitoring — logs lifecycle events and notifies Claude on outages
 // ---------------------------------------------------------------------------
 
-export const HEALTH_TIMEOUT = 120_000; // 2 minutes
 export const OUTAGE_THRESHOLD = 10_000; // 10s — only notify if disconnect lasts longer than this
 export const RECONNECT_DEBOUNCE = 5_000; // 5s — wait for connection to stabilize after reconnect
 
@@ -264,7 +262,6 @@ function monitorConnection(
 ): () => void {
   // Access the underlying SocketModeClient from Bolt's receiver
   const socketClient = (bolt!.receiver as any).client;
-  let healthTimeout: ReturnType<typeof setTimeout> | null = null;
   let disconnectNotifyTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectNotifyTimer: ReturnType<typeof setTimeout> | null = null;
   let connected = false;
@@ -281,28 +278,6 @@ function monitorConnection(
       clearTimeout(reconnectNotifyTimer);
       reconnectNotifyTimer = null;
     }
-
-    if (healthTimeout) {
-      clearTimeout(healthTimeout);
-      healthTimeout = null;
-    }
-    healthTimeout = setTimeout(async () => {
-      log('health-check timeout — connection dead, shutting down');
-      try {
-        await mcp.notification({
-          method: 'notifications/claude/channel',
-          params: {
-            content:
-              'Slack connection dead — bridge shutting down. Restart with /mcp to reconnect. Do NOT fall back to Slack plugin tools (slack_send_message, etc.) — they bypass the channel bridge.',
-            meta: { channel_id: cid, event_ts: '' },
-          },
-        });
-      } catch {
-        // Best-effort notification before shutdown
-      }
-      onDead();
-    }, HEALTH_TIMEOUT);
-    healthTimeout.unref();
 
     // Delay the "lost" notification — routine Slack WS rotations reconnect in <5s
     // and shouldn't be surfaced. Only notify if disconnect persists.
@@ -328,10 +303,6 @@ function monitorConnection(
   socketClient.on('connected', () => {
     if (stopped) return;
     log('Socket Mode connected');
-    if (healthTimeout) {
-      clearTimeout(healthTimeout);
-      healthTimeout = null;
-    }
 
     // Cancel pending "lost" notification — reconnected before threshold
     if (disconnectNotifyTimer) {
@@ -397,10 +368,6 @@ function monitorConnection(
     if (disconnectNotifyTimer) {
       clearTimeout(disconnectNotifyTimer);
       disconnectNotifyTimer = null;
-    }
-    if (healthTimeout) {
-      clearTimeout(healthTimeout);
-      healthTimeout = null;
     }
     if (reconnectNotifyTimer) {
       clearTimeout(reconnectNotifyTimer);

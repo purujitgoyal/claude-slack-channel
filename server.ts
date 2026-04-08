@@ -72,6 +72,22 @@ export function startWatchdog(): void {
 // Lazy activation — only when client negotiates claude/channel support
 // ---------------------------------------------------------------------------
 
+/**
+ * The activate implementation. Exported as a let so tests can replace it via
+ * setActivateFn() — mirrors the getPpid / setGetPpid testability seam.
+ */
+export let activateFn: () => Promise<void> = activate;
+
+/** Override the activate function for testing only. */
+export function setActivateFn(fn: () => Promise<void>): void {
+  activateFn = fn;
+}
+
+/** Reset activateFn to the real implementation — exported for test cleanup. */
+export function resetActivateFn(): void {
+  activateFn = activate;
+}
+
 async function activate(): Promise<void> {
   const env = loadEnv(ENV_PATH);
   const botToken = env.SLACK_BOT_TOKEN ?? '';
@@ -115,19 +131,34 @@ async function activate(): Promise<void> {
   log(`channel activated — ${channelId}`);
 }
 
-mcp.oninitialized = () => {
+/**
+ * Exported so tests can invoke the oninitialized logic directly without going
+ * through the MCP transport. The body is extracted here and assigned to
+ * mcp.oninitialized below — this is the smallest refactor that enables
+ * unit-testing the activation gate and exit-on-failure behaviour.
+ */
+export function handleInitialized(): void {
   const caps = mcp.getClientCapabilities();
   const hasChannel = caps?.experimental?.['claude/channel'] != null;
-  const envActivate = process.env.SLACK_CHANNEL_ACTIVATE === '1';
-  if (!hasChannel && !envActivate) {
-    log('channel not requested — staying dormant');
+  if (!hasChannel) {
+    if (process.env.SLACK_CHANNEL_ACTIVATE) {
+      log(
+        'SLACK_CHANNEL_ACTIVATE is no longer supported — activation is gated on --dangerously-load-development-channels',
+      );
+    }
+    log(
+      'channel not requested — staying dormant (start with --dangerously-load-development-channels to activate)',
+    );
     return;
   }
-  log(`activating (channel=${hasChannel}, env=${envActivate})`);
-  activate().catch((err) => {
+  log('activating (channel=true)');
+  activateFn().catch((err) => {
     log(`activation failed: ${err}`);
+    process.exit(1);
   });
-};
+}
+
+mcp.oninitialized = handleInitialized;
 
 // ---------------------------------------------------------------------------
 // Graceful shutdown

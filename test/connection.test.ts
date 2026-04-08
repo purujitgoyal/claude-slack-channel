@@ -89,7 +89,11 @@ const {
   startWatchdog,
   setGetPpid,
   resetWatchdog,
+  handleInitialized,
+  setActivateFn,
+  resetActivateFn,
 } = await import('../server');
+const { mcp } = await import('../src/mcp');
 
 // ---------------------------------------------------------------------------
 // Test suite
@@ -794,5 +798,100 @@ describe('watchdog', () => {
 
     // clearInterval must have been called with the watchdog handle
     expect(clearedHandle).toBe(capturedHandle);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Activation gate — mcp.oninitialized / handleInitialized behaviour
+// ---------------------------------------------------------------------------
+
+describe('activation gate', () => {
+  let origExit: typeof process.exit;
+  let origGetCaps: typeof mcp.getClientCapabilities;
+  const exitMock = mock((_code?: number) => {});
+
+  beforeEach(() => {
+    origExit = process.exit;
+    (process as any).exit = exitMock;
+    exitMock.mockClear();
+
+    origGetCaps = mcp.getClientCapabilities.bind(mcp);
+  });
+
+  afterEach(() => {
+    (process as any).exit = origExit;
+    // Restore getClientCapabilities
+    mcp.getClientCapabilities = origGetCaps;
+    // Restore the real activate function
+    resetActivateFn();
+    // Clean up SLACK_CHANNEL_ACTIVATE if set
+    delete process.env.SLACK_CHANNEL_ACTIVATE;
+  });
+
+  test('activation failure exits with code 1', async () => {
+    // Mock getClientCapabilities to return the claude/channel capability
+    (mcp as any).getClientCapabilities = () => ({
+      experimental: { 'claude/channel': {} },
+    });
+
+    // Replace activateFn with one that rejects
+    const activateError = new Error('credentials missing');
+    setActivateFn(() => Promise.reject(activateError));
+
+    // Invoke the handler
+    handleInitialized();
+
+    // Let the microtask queue drain so the .catch() handler fires
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(exitMock).toHaveBeenCalledWith(1);
+  });
+
+  test('channel not requested stays dormant without exiting', () => {
+    // No claude/channel capability
+    (mcp as any).getClientCapabilities = () => ({ experimental: {} });
+
+    // Replace activateFn with one that would fail if called
+    setActivateFn(() => Promise.reject(new Error('should not be called')));
+
+    const errorSpy = mock((..._args: any[]) => {});
+    const origError = console.error;
+    console.error = errorSpy;
+
+    handleInitialized();
+
+    console.error = origError;
+
+    // process.exit must NOT have been called
+    expect(exitMock).not.toHaveBeenCalled();
+
+    // The dormant log message must have been emitted
+    const logged = errorSpy.mock.calls.some((call: any[]) =>
+      String(call[0]).includes('staying dormant'),
+    );
+    expect(logged).toBe(true);
+  });
+
+  test('warns when SLACK_CHANNEL_ACTIVATE is set', () => {
+    // Set the legacy env var and no claude/channel capability
+    process.env.SLACK_CHANNEL_ACTIVATE = '1';
+    (mcp as any).getClientCapabilities = () => ({ experimental: {} });
+
+    const errorSpy = mock((..._args: any[]) => {});
+    const origError = console.error;
+    console.error = errorSpy;
+
+    handleInitialized();
+
+    console.error = origError;
+
+    // Must have logged the deprecation warning
+    const warned = errorSpy.mock.calls.some((call: any[]) =>
+      String(call[0]).includes('no longer supported'),
+    );
+    expect(warned).toBe(true);
+
+    // Must still be dormant (no exit called)
+    expect(exitMock).not.toHaveBeenCalled();
   });
 });

@@ -8,17 +8,29 @@
  * KEY BUG DOCUMENTED: Leaked health timeouts on rapid disconnect events.
  */
 
-import { mock, describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
   FakeTimers,
   HEALTH_TIMEOUT,
   OUTAGE_THRESHOLD,
   RECONNECT_DEBOUNCE,
-  TEST_CHANNEL_ID,
   TEST_ALLOWED_USER,
-  TEST_BOT_TOKEN,
   TEST_APP_TOKEN,
+  TEST_BOT_TOKEN,
+  TEST_CHANNEL_ID,
 } from './helpers';
+
+// ---------------------------------------------------------------------------
+// Mock ../src/lock — must be before any import that loads it (bun:ffi/dlopen)
+// ---------------------------------------------------------------------------
+
+const releaseLockMock = mock(() => {});
+const acquireLockMock = mock(() => {});
+
+mock.module('../src/lock', () => ({
+  acquireLock: acquireLockMock,
+  releaseLock: releaseLockMock,
+}));
 
 // ---------------------------------------------------------------------------
 // Mock @slack/bolt — must be before any import that transitively loads it
@@ -71,6 +83,7 @@ mock.module('@slack/bolt', () => {
 // ---------------------------------------------------------------------------
 
 const { startSlack, stopSlack } = await import('../src/slack');
+const { shutdownGracefully, resetShuttingDown } = await import('../server');
 
 // ---------------------------------------------------------------------------
 // Test suite
@@ -316,13 +329,17 @@ describe('Connection Monitoring', () => {
       // Wait for disconnect notification to fire
       await timers.tick(OUTAGE_THRESHOLD);
       expect(mcpMock.notification).toHaveBeenCalledTimes(1);
-      expect(mcpMock.notification.mock.calls[0][0].params.content).toContain('connection lost');
+      expect(mcpMock.notification.mock.calls[0][0].params.content).toContain(
+        'connection lost',
+      );
 
       app.socketClient.emit('connected');
       // Wait for reconnect debounce
       await timers.tick(RECONNECT_DEBOUNCE);
       expect(mcpMock.notification).toHaveBeenCalledTimes(2);
-      expect(mcpMock.notification.mock.calls[1][0].params.content).toContain('restored');
+      expect(mcpMock.notification.mock.calls[1][0].params.content).toContain(
+        'restored',
+      );
     });
 
     test('brief disconnect-reconnect sends no notifications', () => {
@@ -475,7 +492,7 @@ describe('Connection Monitoring', () => {
   });
 
   // =========================================================================
-  // Complex / Edge-Case Scenarios
+  // Complex / Edge-Case Scenarios (existing)
   // =========================================================================
 
   describe('complex scenarios', () => {
@@ -544,5 +561,117 @@ describe('Connection Monitoring', () => {
         expect(call[0].params.meta.channel_id).toBe(TEST_CHANNEL_ID);
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// shutdownGracefully — idempotency and force-exit safety net
+// ---------------------------------------------------------------------------
+
+describe('shutdownGracefully', () => {
+  let origExit: typeof process.exit;
+  const exitMock = mock((_code?: number) => {});
+  const timers = new FakeTimers();
+
+  beforeEach(async () => {
+    // Reset the module-level shuttingDown guard before each test
+    resetShuttingDown();
+    // Stub process.exit so tests do not actually exit the runner
+    origExit = process.exit;
+    (process as any).exit = exitMock;
+    exitMock.mockClear();
+    releaseLockMock.mockClear();
+    // Install fake timers so we can control setTimeout
+    timers.install();
+    // Ensure a bolt instance exists so stopSlack() has something to call
+    apps.length = 0;
+    await startSlack({
+      mcp: { notification: mock(async () => {}) } as any,
+      botToken: TEST_BOT_TOKEN,
+      appToken: TEST_APP_TOKEN,
+      channelId: TEST_CHANNEL_ID,
+      allowedUserId: TEST_ALLOWED_USER,
+      onDead: mock(() => {}),
+    });
+  });
+
+  afterEach(async () => {
+    timers.uninstall();
+    (process as any).exit = origExit;
+    // Reset bolt.stop to a fast mock so stopSlack() can complete during cleanup
+    // (some tests leave bolt.stop mocked to hang — undo that here)
+    const currentApp = apps[apps.length - 1];
+    if (currentApp) {
+      currentApp.stop.mockImplementation(async () => {});
+    }
+    // Tear down bolt state. stopSlack may already have been called, so we
+    // catch and ignore errors here.
+    try {
+      await stopSlack();
+    } catch {
+      // ignore — bolt may already be stopped
+    }
+  });
+
+  test('shutdownGracefully is idempotent', async () => {
+    // Make bolt.stop resolve immediately so stopSlack settles
+    const currentApp = apps[apps.length - 1];
+    currentApp.stop.mockImplementation(async () => {});
+
+    // Call twice synchronously — second call must be a no-op
+    shutdownGracefully();
+    shutdownGracefully();
+
+    // Let any immediately-queued microtasks settle
+    await Promise.resolve();
+
+    // releaseLock must be called exactly once despite two shutdownGracefully calls
+    expect(releaseLockMock).toHaveBeenCalledTimes(1);
+    // bolt.stop called exactly once (via stopSlack)
+    expect(currentApp.stop).toHaveBeenCalledTimes(1);
+  });
+
+  test('force-exit timer fires when stopSlack hangs', async () => {
+    // Make bolt.stop return a forever-pending promise to simulate a hung stop
+    const currentApp = apps[apps.length - 1];
+    currentApp.stop.mockImplementation(() => new Promise<void>(() => {}));
+
+    shutdownGracefully();
+
+    // Before 3 s — process.exit must not have been called yet
+    await timers.tick(2900);
+    expect(exitMock).not.toHaveBeenCalled();
+
+    // After 3 s — force-exit timer must have fired with exit code 1
+    await timers.tick(200); // total 3100ms > 3000ms
+    expect(exitMock).toHaveBeenCalledWith(1);
+  });
+
+  test("force-exit timer is unref'd", () => {
+    // Wrap the fake setTimeout to spy on .unref() of the returned handle.
+    // FakeTimers installs its own fake, so we wrap that here.
+    const fakeST = globalThis.setTimeout;
+    let capturedHandle: any = null;
+    (globalThis as any).setTimeout = (
+      cb: (...a: unknown[]) => unknown,
+      delay: number,
+      ...args: unknown[]
+    ) => {
+      const handle = (fakeST as any)(cb, delay, ...args);
+      // Spy on unref for the very first setTimeout call — the force-exit timer
+      if (capturedHandle === null) {
+        handle.unref = mock(() => {});
+        capturedHandle = handle;
+      }
+      return handle;
+    };
+
+    shutdownGracefully();
+
+    // Restore our wrapper (FakeTimers uninstall restores the original)
+    (globalThis as any).setTimeout = fakeST;
+
+    expect(capturedHandle).not.toBeNull();
+    expect(capturedHandle.unref).toHaveBeenCalledTimes(1);
   });
 });

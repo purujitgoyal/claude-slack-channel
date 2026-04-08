@@ -16,6 +16,17 @@ import {
 import { postThreaded, startSlack, stopSlack } from './src/slack.ts';
 
 // ---------------------------------------------------------------------------
+// Shutdown guard — prevents reentry from racing SIGTERM, SIGINT, stdin-close
+// ---------------------------------------------------------------------------
+
+let shuttingDown = false;
+
+/** Reset the shuttingDown flag — exported for test cleanup only. */
+export function resetShuttingDown(): void {
+  shuttingDown = false;
+}
+
+// ---------------------------------------------------------------------------
 // Lazy activation — only when client negotiates claude/channel support
 // ---------------------------------------------------------------------------
 
@@ -79,20 +90,33 @@ mcp.oninitialized = () => {
 // Graceful shutdown
 // ---------------------------------------------------------------------------
 
-function shutdownGracefully() {
+export function shutdownGracefully(): void {
+  // Idempotent: racing SIGTERM + SIGINT + stdin-close must not double-release
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  // Safety net: if stopSlack() hangs, force-exit after 3 s.
+  // .unref() prevents this timer from keeping the event loop alive on its own.
+  const forceExitTimer = setTimeout(() => process.exit(1), 3000);
+  forceExitTimer.unref();
+
   if (isChannelActive())
     saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
   releaseLock();
   stopSlack().finally(() => process.exit(0));
 }
 
-process.on('SIGINT', shutdownGracefully);
-process.on('SIGTERM', shutdownGracefully);
-process.stdin.on('close', shutdownGracefully);
+if (import.meta.main) {
+  process.on('SIGINT', shutdownGracefully);
+  process.on('SIGTERM', shutdownGracefully);
+  process.stdin.on('close', shutdownGracefully);
+}
 
 // ---------------------------------------------------------------------------
 // Connect MCP transport
 // ---------------------------------------------------------------------------
 
-await mcp.connect(new StdioServerTransport());
-log('MCP connected — waiting for channel activation');
+if (import.meta.main) {
+  await mcp.connect(new StdioServerTransport());
+  log('MCP connected — waiting for channel activation');
+}

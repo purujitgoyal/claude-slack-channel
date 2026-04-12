@@ -70,6 +70,8 @@ export class FakeTimers {
 // ---------------------------------------------------------------------------
 
 export {
+  FLAP_THRESHOLD,
+  FLAP_WINDOW,
   OUTAGE_THRESHOLD,
   RECONNECT_DEBOUNCE,
   RECOVERY_THRESHOLD,

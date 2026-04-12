@@ -70,7 +70,7 @@ async function fetchThreadSummary(threadTs: string): Promise<string> {
     const result = await bolt!.client.conversations.replies({
       channel: channelId,
       ts: threadTs,
-      limit: 50,
+      limit: 20,
     });
 
     const messages = result.messages ?? [];
@@ -384,6 +384,8 @@ function formatRestoredMessage(
 export const OUTAGE_THRESHOLD = 10_000; // 10s — only notify if disconnect lasts longer than this
 export const RECONNECT_DEBOUNCE = 5_000; // 5s — wait for connection to stabilize after reconnect
 export const RECOVERY_THRESHOLD = 60_000; // 60s — only fetch history on reconnect if outage exceeded this
+export const FLAP_WINDOW = 10_000; // 10s — sliding window for detecting reconnect flapping
+export const FLAP_THRESHOLD = 5; // 5 connected events within FLAP_WINDOW = stuck loop
 
 // ---------------------------------------------------------------------------
 // Recovery function seam — allows tests to stub recoverMissedMessages
@@ -420,6 +422,7 @@ function monitorConnection(
   let stopped = false;
   let disconnectedAt: number | null = null;
   let diagCloseListener: ((code: number, reason: Buffer) => void) | null = null;
+  const connectedTimestamps: number[] = [];
 
   socketClient.on('disconnected', () => {
     if (stopped) return;
@@ -460,6 +463,37 @@ function monitorConnection(
   socketClient.on('connected', () => {
     if (stopped) return;
     log('Socket Mode connected');
+
+    // Flap detection — if we see FLAP_THRESHOLD connected events within
+    // FLAP_WINDOW, the finity state machine is stuck in a reconnect loop
+    // (typically after sleep/wake). Notify Claude and kill the bridge so
+    // the user can /mcp to recover cleanly.
+    const now = Date.now();
+    connectedTimestamps.push(now);
+    // Trim events outside the window
+    while (
+      connectedTimestamps.length > 0 &&
+      connectedTimestamps[0] < now - FLAP_WINDOW
+    ) {
+      connectedTimestamps.shift();
+    }
+    if (connectedTimestamps.length >= FLAP_THRESHOLD) {
+      log(
+        `reconnect flap detected (${connectedTimestamps.length} connects in ${FLAP_WINDOW / 1000}s) — killing bridge`,
+      );
+      mcp
+        .notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content:
+              '/mcp to recover — Slack stuck in reconnect loop (sleep/wake).',
+            meta: { channel_id: cid, event_ts: '' },
+          },
+        })
+        .catch(() => {});
+      onDead();
+      return;
+    }
 
     // Cancel pending "lost" notification — reconnected before threshold
     if (disconnectNotifyTimer) {

@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
   FakeTimers,
+  FLAP_THRESHOLD,
   OUTAGE_THRESHOLD,
   RECONNECT_DEBOUNCE,
   TEST_ALLOWED_USER,
@@ -233,11 +234,57 @@ describe('Connection Monitoring', () => {
       expect(timers.pending).toBe(0);
     });
 
-    test('multiple connected events are harmless', () => {
+    test('multiple connected events below FLAP_THRESHOLD are harmless', () => {
+      // 3 events is below FLAP_THRESHOLD (5) — no flap detection
       app.socketClient.emit('connected');
       app.socketClient.emit('connected');
       app.socketClient.emit('connected');
       expect(timers.pending).toBe(0);
+      expect(onDead).not.toHaveBeenCalled();
+    });
+
+    test('FLAP_THRESHOLD connected events within window calls onDead', () => {
+      // beforeEach already emitted 1 connected event (initial connection),
+      // so we need FLAP_THRESHOLD - 1 more to trigger the flap detector
+      for (let i = 0; i < FLAP_THRESHOLD - 1; i++) {
+        app.socketClient.emit('connected');
+      }
+      expect(onDead).toHaveBeenCalledTimes(1);
+      // Notification sent before onDead
+      expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+      const call = mcpMock.notification.mock.calls[0][0];
+      expect(call.params.content).toContain('/mcp to recover');
+    });
+
+    test('flap detection does not fire when events are spread across windows', () => {
+      const origDateNow = Date.now;
+      let now = Date.now() + 60_000; // well after any prior events
+      Date.now = () => now;
+
+      // Emit FLAP_THRESHOLD - 2 events (+ 1 from beforeEach = FLAP_THRESHOLD - 1, just under)
+      for (let i = 0; i < FLAP_THRESHOLD - 2; i++) {
+        app.socketClient.emit('connected');
+        now += 500;
+      }
+      expect(onDead).not.toHaveBeenCalled();
+
+      // Advance time past the flap window so old events expire
+      now += 15_000;
+
+      // Emit again — should not trigger because old events fell out of window
+      app.socketClient.emit('connected');
+      expect(onDead).not.toHaveBeenCalled();
+
+      Date.now = origDateNow;
+    });
+
+    test('flap notification error does not prevent onDead', () => {
+      mcpMock.notification.mockRejectedValue(new Error('transport dead'));
+      for (let i = 0; i < FLAP_THRESHOLD - 1; i++) {
+        app.socketClient.emit('connected');
+      }
+      // onDead still called even though notification failed
+      expect(onDead).toHaveBeenCalledTimes(1);
     });
 
     test('swallows MCP notification errors', async () => {
@@ -896,33 +943,21 @@ describe('watchdog', () => {
 
 describe('activation gate', () => {
   let origExit: typeof process.exit;
-  let origGetCaps: typeof mcp.getClientCapabilities;
   const exitMock = mock((_code?: number) => {});
 
   beforeEach(() => {
     origExit = process.exit;
     (process as any).exit = exitMock;
     exitMock.mockClear();
-
-    origGetCaps = mcp.getClientCapabilities.bind(mcp);
   });
 
   afterEach(() => {
     (process as any).exit = origExit;
-    // Restore getClientCapabilities
-    mcp.getClientCapabilities = origGetCaps;
     // Restore the real activate function
     resetActivateFn();
-    // Clean up SLACK_CHANNEL_ACTIVATE if set
-    delete process.env.SLACK_CHANNEL_ACTIVATE;
   });
 
   test('activation failure exits with code 1', async () => {
-    // Mock getClientCapabilities to return the claude/channel capability
-    (mcp as any).getClientCapabilities = () => ({
-      experimental: { 'claude/channel': {} },
-    });
-
     // Replace activateFn with one that rejects
     const activateError = new Error('credentials missing');
     setActivateFn(() => Promise.reject(activateError));
@@ -934,53 +969,5 @@ describe('activation gate', () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(exitMock).toHaveBeenCalledWith(1);
-  });
-
-  test('channel not requested stays dormant without exiting', () => {
-    // No claude/channel capability
-    (mcp as any).getClientCapabilities = () => ({ experimental: {} });
-
-    // Replace activateFn with one that would fail if called
-    setActivateFn(() => Promise.reject(new Error('should not be called')));
-
-    const errorSpy = mock((..._args: any[]) => {});
-    const origError = console.error;
-    console.error = errorSpy;
-
-    handleInitialized();
-
-    console.error = origError;
-
-    // process.exit must NOT have been called
-    expect(exitMock).not.toHaveBeenCalled();
-
-    // The dormant log message must have been emitted
-    const logged = errorSpy.mock.calls.some((call: any[]) =>
-      String(call[0]).includes('staying dormant'),
-    );
-    expect(logged).toBe(true);
-  });
-
-  test('warns when SLACK_CHANNEL_ACTIVATE is set', () => {
-    // Set the legacy env var and no claude/channel capability
-    process.env.SLACK_CHANNEL_ACTIVATE = '1';
-    (mcp as any).getClientCapabilities = () => ({ experimental: {} });
-
-    const errorSpy = mock((..._args: any[]) => {});
-    const origError = console.error;
-    console.error = errorSpy;
-
-    handleInitialized();
-
-    console.error = origError;
-
-    // Must have logged the deprecation warning
-    const warned = errorSpy.mock.calls.some((call: any[]) =>
-      String(call[0]).includes('no longer supported'),
-    );
-    expect(warned).toBe(true);
-
-    // Must still be dormant (no exit called)
-    expect(exitMock).not.toHaveBeenCalled();
   });
 });

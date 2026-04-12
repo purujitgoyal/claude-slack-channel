@@ -138,20 +138,7 @@ async function activate(): Promise<void> {
  * unit-testing the activation gate and exit-on-failure behaviour.
  */
 export function handleInitialized(): void {
-  const caps = mcp.getClientCapabilities();
-  const hasChannel = caps?.experimental?.['claude/channel'] != null;
-  if (!hasChannel) {
-    if (process.env.SLACK_CHANNEL_ACTIVATE) {
-      log(
-        'SLACK_CHANNEL_ACTIVATE is no longer supported — activation is gated on --dangerously-load-development-channels',
-      );
-    }
-    log(
-      'channel not requested — staying dormant (start with --dangerously-load-development-channels to activate)',
-    );
-    return;
-  }
-  log('activating (channel=true)');
+  log('activating');
   activateFn().catch((err) => {
     log(`activation failed: ${err}`);
     process.exit(1);

@@ -101,7 +101,7 @@ approve tool use.
 `.trim();
 
 export const mcp = new Server(
-  { name: 'slack-channel', version: '0.7.0' },
+  { name: 'slack-channel', version: '0.7.1' },
   {
     capabilities: {
       experimental: {

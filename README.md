@@ -175,6 +175,20 @@ Uses [Biome](https://biomejs.dev) for linting and formatting.
 - Inbound messages require `--dangerously-load-development-channels` flag (research preview)
 - Permission relay requires Claude Code v2.1.81+
 
+### Sleep/wake and the Slack connection
+
+When your machine sleeps (lid close, idle sleep), the Slack WebSocket connection drops and Claude Code kills its stdio child processes — including this plugin. On wake, CC spawns a fresh plugin process, but it often hits a rapid reconnect loop as the network recovers. The plugin detects this flap (5+ reconnects in 10 seconds), kills the bridge, and notifies Claude.
+
+**How to recover:**
+
+1. Open `/mcp` in Claude Code and **reconnect** the slack-channel server — this is usually enough
+2. If reconnecting doesn't work, wait a few seconds for the network to stabilize and try again
+3. If the session is stale (overnight sleep, prolonged idle), start a new Claude Code session
+
+Messages sent to your Slack channel during the outage are recovered automatically if the outage was longer than 60 seconds.
+
+**Why this can't be fixed in the plugin:** This is an inherent limitation of channel plugins that need persistent connections. CC plugins run as stdio child processes that are killed on sleep. Most MCP servers (MongoDB, Linear, etc.) are unaffected because they make stateless HTTP calls — they don't need to maintain a connection. Channel plugins are fundamentally different: they need a persistent connection both to the chat platform (Slack's WebSocket) and to CC (stdio or SSE) to push inbound messages in real time. There's no transport option that avoids this — even running as a standalone HTTP server would require SSE or polling for push delivery, reintroducing the same problem.
+
 ## Debugging
 
 Set `SLACK_CHANNEL_DEBUG=1` in env to enable debug file logging to `~/.claude/channels/slack/debug.log`.

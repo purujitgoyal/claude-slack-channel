@@ -5,7 +5,9 @@ import { acquireLock, releaseLock } from './src/lock.ts';
 import {
   isChannelActive,
   mcp,
+  setActivate,
   setChannelActive,
+  setDeactivate,
   setSlackBridge,
 } from './src/mcp.ts';
 import {
@@ -127,25 +129,28 @@ async function activate(): Promise<void> {
   });
 
   setChannelActive(true);
-  await mcp.sendToolListChanged();
   log(`channel activated — ${channelId}`);
 }
 
-/**
- * Exported so tests can invoke the oninitialized logic directly without going
- * through the MCP transport. The body is extracted here and assigned to
- * mcp.oninitialized below — this is the smallest refactor that enables
- * unit-testing the activation gate and exit-on-failure behaviour.
- */
-export function handleInitialized(): void {
+// Inject activate/deactivate into MCP so the connect/disconnect tools can call them.
+setActivate(async () => {
   log('activating');
-  activateFn().catch((err) => {
-    log(`activation failed: ${err}`);
-    process.exit(1);
-  });
-}
+  await activateFn();
+});
 
-mcp.oninitialized = handleInitialized;
+setDeactivate(async () => {
+  log('deactivating');
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
+  }
+  saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
+  releaseLock();
+  await stopSlack();
+  setSlackBridge(null!);
+  setChannelActive(false);
+  log('channel deactivated');
+});
 
 // ---------------------------------------------------------------------------
 // Graceful shutdown

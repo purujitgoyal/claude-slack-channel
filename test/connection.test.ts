@@ -92,11 +92,8 @@ const {
   startWatchdog,
   setGetPpid,
   resetWatchdog,
-  handleInitialized,
-  setActivateFn,
-  resetActivateFn,
 } = await import('../server');
-const { mcp } = await import('../src/mcp');
+const { mcp, setChannelActive } = await import('../src/mcp');
 const { setLastSeenEventTs } = await import('../src/session');
 
 // ---------------------------------------------------------------------------
@@ -938,36 +935,19 @@ describe('watchdog', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Activation gate — mcp.oninitialized / handleInitialized behaviour
+// Connect tool — tool list changes based on activation state
 // ---------------------------------------------------------------------------
 
-describe('activation gate', () => {
-  let origExit: typeof process.exit;
-  const exitMock = mock((_code?: number) => {});
+describe('connect tool', () => {
+  const listTools = (mcp as any)._requestHandlers?.get('tools/list');
 
-  beforeEach(() => {
-    origExit = process.exit;
-    (process as any).exit = exitMock;
-    exitMock.mockClear();
-  });
-
-  afterEach(() => {
-    (process as any).exit = origExit;
-    // Restore the real activate function
-    resetActivateFn();
-  });
-
-  test('activation failure exits with code 1', async () => {
-    // Replace activateFn with one that rejects
-    const activateError = new Error('credentials missing');
-    setActivateFn(() => Promise.reject(activateError));
-
-    // Invoke the handler
-    handleInitialized();
-
-    // Let the microtask queue drain so the .catch() handler fires
-    await new Promise<void>((resolve) => setImmediate(resolve));
-
-    expect(exitMock).toHaveBeenCalledWith(1);
+  test('always lists all tools including connect', async () => {
+    setChannelActive(false);
+    const result = await listTools({ method: 'tools/list', params: {} });
+    const names = result.tools.map((t: any) => t.name);
+    expect(names).toContain('connect');
+    expect(names).toContain('reply');
+    expect(names).toContain('new_thread');
+    expect(names).toContain('react');
   });
 });

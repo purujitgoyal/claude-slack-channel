@@ -56,6 +56,23 @@ export function isChannelActive(): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Activate function — injected by server.ts to avoid circular deps
+// ---------------------------------------------------------------------------
+
+type LifecycleFn = () => Promise<void>;
+
+let injectedActivate: LifecycleFn | null = null;
+let injectedDeactivate: LifecycleFn | null = null;
+
+export function setActivate(fn: LifecycleFn): void {
+  injectedActivate = fn;
+}
+
+export function setDeactivate(fn: LifecycleFn): void {
+  injectedDeactivate = fn;
+}
+
+// ---------------------------------------------------------------------------
 // MCP server — starts dormant (no tools) until channel mode is detected
 // ---------------------------------------------------------------------------
 
@@ -66,6 +83,8 @@ Inbound messages arrive as:
   <channel source="slack" slack_user_id="U01..." channel_id="C01..." event_ts="...">message text</channel>
 
 TOOLS:
+- connect: Call this first to activate the Slack bridge in this session. Only one session can be
+  connected at a time. Other sessions remain dormant until you call connect.
 - reply: Respond within the active thread. Use for replying to user messages and ongoing conversation.
 - new_thread: Start a fresh thread. Use to proactively reach the user (status updates, questions, alerts),
   or after /compact or /clear. Pass text to post the first message immediately.
@@ -74,9 +93,9 @@ TOOLS:
 - Keep messages concise — the user reads these on mobile.
 
 GETTING STARTED:
-- When asked to "continue on Slack", "move to Slack", or similar — immediately call new_thread
-  with a brief summary of what you're working on. Do NOT ask the user to @mention first.
-- You can always proactively call new_thread to reach the user on Slack.
+- When asked to "continue on Slack", "move to Slack", or similar — call connect first, then
+  call new_thread with a brief summary of what you're working on. Do NOT ask the user to @mention first.
+- You can always proactively call connect + new_thread to reach the user on Slack.
 
 THREAD LIFECYCLE:
 - The user @mentions the bot to start a new thread, OR you call new_thread to start one.
@@ -118,7 +137,27 @@ export const mcp = new Server(
 // MCP tools — empty when dormant, populated when channel is active
 // ---------------------------------------------------------------------------
 
-const TOOLS = [
+const CONNECT_TOOL = {
+  name: 'connect',
+  description:
+    'Connect this session to the Slack channel. Only one session can be connected at a time. Call this before using reply/new_thread/react.',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {},
+  },
+};
+
+const DISCONNECT_TOOL = {
+  name: 'disconnect',
+  description:
+    'Disconnect this session from the Slack channel, releasing the lock so another session can connect.',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {},
+  },
+};
+
+const CHANNEL_TOOLS = [
   {
     name: 'reply',
     description:
@@ -173,11 +212,28 @@ const TOOLS = [
 ];
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS,
+  tools: [CONNECT_TOOL, DISCONNECT_TOOL, ...CHANNEL_TOOLS],
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
-  if (!channelActive) throw new Error('slack channel is not active');
+  if (req.params.name === 'connect') {
+    if (channelActive) return textResult('Already connected.');
+    if (!injectedActivate) throw new Error('activate function not set');
+    await injectedActivate();
+    return textResult('Connected to Slack.');
+  }
+
+  if (req.params.name === 'disconnect') {
+    if (!channelActive) return textResult('Not connected.');
+    if (!injectedDeactivate) throw new Error('deactivate function not set');
+    await injectedDeactivate();
+    return textResult(
+      'Disconnected from Slack. Another session can now connect.',
+    );
+  }
+
+  if (!channelActive)
+    throw new Error('slack channel is not active — call connect first');
   const b = requireBridge();
 
   if (req.params.name === 'reply') {

@@ -95,30 +95,13 @@ bun install
 
 ## Start
 
-### Option A: Managed settings (recommended)
-
-Add the plugin to your `allowedChannelPlugins` in Claude Code managed settings (`~/.claude/settings.json`):
-
-```json
-{
-  "channelsEnabled": true,
-  "allowedChannelPlugins": [
-    { "marketplace": "claude-slack-channel", "plugin": "slack-channel" }
-  ]
-}
-```
-
-Then start Claude Code normally — no flags needed.
-
-### Option B: Development flag
+Start Claude Code with the development channels flag:
 
 ```bash
 claude --dangerously-load-development-channels plugin:slack-channel@claude-slack-channel
 ```
 
-This bypasses the allowlist check and loads the specified channel plugin.
-
-### Activating the bridge
+> **Team/Enterprise admins** can skip the flag by adding the plugin to `allowedChannelPlugins` in managed settings instead. This is not available for personal use.
 
 The plugin starts dormant. Call the `connect` tool in the session you want to use — this gives you control over which session owns the channel, especially useful when running multiple sessions.
 
@@ -188,7 +171,7 @@ Uses [Biome](https://biomejs.dev) for linting and formatting.
 - One Slack app per user — Slack's Socket Mode doesn't support sharing an app across users (events are round-robined, not duplicated)
 - Single Claude Code session per user at a time (enforced by `flock(2)` — second session gets a clear error)
 - No file attachment support yet
-- Inbound messages require either `allowedChannelPlugins` in managed settings or the `--dangerously-load-development-channels` flag
+- Inbound messages require `--dangerously-load-development-channels` flag for personal use (Team/Enterprise admins can use `allowedChannelPlugins` in managed settings instead)
 - Permission relay requires Claude Code v2.1.81+
 
 ### Sleep/wake and the Slack connection

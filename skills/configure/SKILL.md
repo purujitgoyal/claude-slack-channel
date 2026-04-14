@@ -84,28 +84,15 @@ chmod 600 ~/.claude/channels/slack/.env
 test -f ~/.claude/channels/slack/.env && echo "Config file found" || echo "Config file not found"
 ```
 
-### 6. Enable channel plugin
-
-Add the plugin to Claude Code managed settings (`~/.claude/settings.json`):
-
-```json
-{
-  "channelsEnabled": true,
-  "allowedChannelPlugins": [
-    { "marketplace": "claude-slack-channel", "plugin": "slack-channel" }
-  ]
-}
-```
-
-If the user already has a `settings.json`, merge these keys into it. If `allowedChannelPlugins` already has entries, append to the array.
-
-Alternatively, the user can skip this and use `claude --dangerously-load-development-channels` each time.
-
-### 7. Activate
+### 6. Activate
 
 Tell the user:
 
-> Configuration complete. Start Claude Code normally (no flags needed if you added the settings above).
+> Configuration complete. Start Claude Code with the development channels flag:
+>
+> ```bash
+> claude --dangerously-load-development-channels plugin:slack-channel@claude-slack-channel
+> ```
 >
 > Call the `connect` tool to activate the Slack bridge in your session.
 > Then @mention the bot in your channel to start a conversation.

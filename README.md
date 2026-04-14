@@ -95,27 +95,40 @@ bun install
 
 ## Start
 
-Start Claude Code with the `--dangerously-load-development-channels` flag to load the plugin and enable inbound Slack messages:
+### Option A: Managed settings (recommended)
 
-```bash
-# If installed as a marketplace plugin:
-claude --dangerously-load-development-channels plugin:slack-channel@claude-slack-channel
+Add the plugin to your `allowedChannelPlugins` in Claude Code managed settings (`~/.claude/settings.json`):
 
-# If using a project .mcp.json:
-claude --dangerously-load-development-channels server:slack-channel
+```json
+{
+  "channelsEnabled": true,
+  "allowedChannelPlugins": [
+    { "marketplace": "claude-slack-channel", "plugin": "slack-channel" }
+  ]
+}
 ```
 
-The plugin starts dormant. To activate the Slack bridge, call the `connect` tool in the session you want to use. This gives you control over which session owns the channel — especially useful when running multiple sessions.
+Then start Claude Code normally — no flags needed.
+
+### Option B: Development flag
+
+```bash
+claude --dangerously-load-development-channels plugin:slack-channel@claude-slack-channel
+```
+
+This bypasses the allowlist check and loads the specified channel plugin.
+
+### Activating the bridge
+
+The plugin starts dormant. Call the `connect` tool in the session you want to use — this gives you control over which session owns the channel, especially useful when running multiple sessions.
 
 Call `disconnect` to release the lock so another session can connect without restarting.
-
-> **Note:** The `--dangerously-load-development-channels` flag is required during the research preview because this plugin isn't on Anthropic's approved allowlist yet.
 
 If another session already holds the lock, `connect` fails with a clear error message.
 
 ## Using it
 
-1. Start Claude Code with the `--dangerously-load-development-channels` flag above
+1. Start Claude Code (with settings or flag above)
 2. Call `connect` to activate the Slack bridge in this session
 3. @mention the bot in your channel (e.g. `@Claude Code Bot check on the workers`)
 4. Claude receives the message and replies in a new thread
@@ -175,7 +188,7 @@ Uses [Biome](https://biomejs.dev) for linting and formatting.
 - One Slack app per user — Slack's Socket Mode doesn't support sharing an app across users (events are round-robined, not duplicated)
 - Single Claude Code session per user at a time (enforced by `flock(2)` — second session gets a clear error)
 - No file attachment support yet
-- Inbound messages require `--dangerously-load-development-channels` flag (research preview)
+- Inbound messages require either `allowedChannelPlugins` in managed settings or the `--dangerously-load-development-channels` flag
 - Permission relay requires Claude Code v2.1.81+
 
 ### Sleep/wake and the Slack connection

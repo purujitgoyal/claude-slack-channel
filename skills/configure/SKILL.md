@@ -88,11 +88,14 @@ test -f ~/.claude/channels/slack/.env && echo "Config file found" || echo "Confi
 
 Tell the user:
 
-> Configuration saved. To activate the channel, start Claude Code with inbound messages enabled:
+> Configuration saved. To load the plugin, start Claude Code with:
 >
 > ```bash
 > claude --dangerously-load-development-channels plugin:slack-channel@claude-slack-channel
 > ```
 >
+> The plugin starts dormant. Call the `connect` tool to activate the Slack bridge in your session.
 > Then @mention the bot in your channel to start a conversation.
 > Permission prompts appear as Allow/Deny buttons in the active thread.
+>
+> To hand off the channel to another session, call `disconnect` first — this releases the lock.

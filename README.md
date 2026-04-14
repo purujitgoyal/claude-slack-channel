@@ -6,8 +6,8 @@ A Claude Code channel plugin that bridges a Slack channel to a Claude Code sessi
 - **Permission relay**: tool-use approval dialogs appear as Block Kit buttons with formatted confirmations (e.g. `Allowed — `Bash` ```git status```) — no need to watch the terminal
 - **Connection monitoring**: detects WebSocket drops, auto-reconnects, and shuts down after 2 minutes of dead connection so `/mcp` can restart cleanly
 - **Threaded**: one session = one thread. Reply in any old thread (even from a past session) to auto-start a new thread with context
-- **Dev-flag activation**: dormant until you start Claude Code with `--dangerously-load-development-channels`
-- **Single-instance guard**: uses `flock(2)` to ensure only one session owns the Slack channel at a time
+- **Explicit activation**: call the `connect` tool to activate — you choose which session owns the channel
+- **Single-instance guard**: uses `flock(2)` to ensure only one session owns the Slack channel at a time. Call `disconnect` to release the lock and hand off to another session
 - **Personal use**: only your Slack user ID can trigger messages or approve tool calls
 
 Primary use case: multi-repo autonomous sessions where you want to monitor progress and approve tool use from your phone without being at the machine.
@@ -95,7 +95,7 @@ bun install
 
 ## Start
 
-Start Claude Code with the `--dangerously-load-development-channels` flag to activate the Slack channel and allow inbound messages to reach Claude:
+Start Claude Code with the `--dangerously-load-development-channels` flag to load the plugin and enable inbound Slack messages:
 
 ```bash
 # If installed as a marketplace plugin:
@@ -105,20 +105,23 @@ claude --dangerously-load-development-channels plugin:slack-channel@claude-slack
 claude --dangerously-load-development-channels server:slack-channel
 ```
 
-Without this flag, outbound tools (reply, new_thread, react) still work, but inbound messages from Slack are ignored.
+The plugin starts dormant. To activate the Slack bridge, call the `connect` tool in the session you want to use. This gives you control over which session owns the channel — especially useful when running multiple sessions.
 
-> **Note:** This flag is required during the research preview because this plugin isn't on Anthropic's approved allowlist yet.
+Call `disconnect` to release the lock so another session can connect without restarting.
 
-If another session already holds the lock, activation fails with a clear error message.
+> **Note:** The `--dangerously-load-development-channels` flag is required during the research preview because this plugin isn't on Anthropic's approved allowlist yet.
+
+If another session already holds the lock, `connect` fails with a clear error message.
 
 ## Using it
 
 1. Start Claude Code with the `--dangerously-load-development-channels` flag above
-2. @mention the bot in your channel (e.g. `@Claude Code Bot check on the workers`)
-3. Claude receives the message and replies in a new thread
-4. Reply in the thread to continue the conversation
-5. When Claude needs tool approval, you'll see Allow/Deny buttons in the thread
-6. If you reply in an old thread, a new thread is started with a summary of the old thread's history
+2. Call `connect` to activate the Slack bridge in this session
+3. @mention the bot in your channel (e.g. `@Claude Code Bot check on the workers`)
+4. Claude receives the message and replies in a new thread
+5. Reply in the thread to continue the conversation
+6. When Claude needs tool approval, you'll see Allow/Deny buttons in the thread
+7. If you reply in an old thread, a new thread is started with a summary of the old thread's history
 
 ### Thread lifecycle
 
@@ -132,7 +135,7 @@ If another session already holds the lock, activation fails with a clear error m
 
 Reply in any old thread — even from a completely different session — and the plugin automatically:
 
-1. Fetches the old thread's history (up to 50 messages, 2000 chars)
+1. Fetches the old thread's history (up to 20 messages, 2000 chars)
 2. Posts a "→ Continued in new thread" breadcrumb in the old thread
 3. Starts a fresh thread with the old context + your new message
 
@@ -160,7 +163,7 @@ Messages from any other Slack user are silently dropped. Button clicks from othe
 ## Development
 
 ```bash
-bun test        # 115 unit tests
+bun test        # 150+ unit tests
 bun run check   # lint + format check
 bun run fix     # auto-fix lint + format issues
 ```

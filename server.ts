@@ -107,29 +107,40 @@ async function activate(): Promise<void> {
   acquireLock();
   startWatchdog();
 
-  setActiveThreadTs(null);
-  saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
+  try {
+    setActiveThreadTs(null);
+    saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
 
-  const app = await startSlack({
-    mcp,
-    botToken,
-    appToken,
-    channelId,
-    allowedUserId,
-    onDead: shutdownGracefully,
-  });
+    const app = await startSlack({
+      mcp,
+      botToken,
+      appToken,
+      channelId,
+      allowedUserId,
+      onDead: shutdownGracefully,
+    });
 
-  setSlackBridge({
-    postThreaded,
-    addReaction: (ch, name, ts) =>
-      app.client.reactions
-        .add({ channel: ch, name, timestamp: ts })
-        .then(() => {}),
-    channelId,
-  });
+    setSlackBridge({
+      postThreaded,
+      addReaction: (ch, name, ts) =>
+        app.client.reactions
+          .add({ channel: ch, name, timestamp: ts })
+          .then(() => {}),
+      channelId,
+    });
 
-  setChannelActive(true);
-  log(`channel activated — ${channelId}`);
+    setChannelActive(true);
+    log(`channel activated — ${channelId}`);
+  } catch (err) {
+    log(`activation failed: ${err}`);
+    if (watchdogInterval) {
+      clearInterval(watchdogInterval);
+      watchdogInterval = null;
+    }
+    releaseLock();
+    await stopSlack();
+    throw err;
+  }
 }
 
 // Inject activate/deactivate into MCP so the connect/disconnect tools can call them.

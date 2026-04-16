@@ -145,6 +145,15 @@ IMPORTANT — TOOL ROUTING:
 This channel is primarily used in multi-repo coordination sessions — the user
 may be away from the terminal and relying on Slack to monitor progress and
 approve tool use.
+
+MODES (after calling connect):
+- Connected: "Connected to Slack." — full two-way messaging + permission relay.
+- Client: "Connected as client..." — outbound only, own thread, no inbound messages.
+  Note: \`react\` is limited in client mode — you can only react to messages in your own thread
+  (using \`ts\` values from \`send_ack\` responses), not to inbound messages you don't receive.
+- Dormant: tools error, call connect first.
+
+Always call connect. The response tells you which mode you're in.
 `.trim();
 
 export const mcp = new Server(
@@ -178,7 +187,7 @@ const CONNECT_TOOL = {
 const DISCONNECT_TOOL = {
   name: 'disconnect',
   description:
-    'Disconnect this session from the Slack channel, releasing the lock so another session can connect.',
+    'Disconnect this session from the Slack channel. In connected mode, releases the lock. In client mode, disconnects from relay.',
   inputSchema: {
     type: 'object' as const,
     properties: {},

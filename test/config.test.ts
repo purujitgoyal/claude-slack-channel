@@ -9,7 +9,14 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadEnv, MENTION_RE, stripMentions, textResult } from '../src/config';
+import {
+  getSessionLabel,
+  loadEnv,
+  MENTION_RE,
+  SOCKET_PATH,
+  stripMentions,
+  textResult,
+} from '../src/config';
 
 // ---------------------------------------------------------------------------
 // loadEnv
@@ -168,5 +175,54 @@ describe('textResult', () => {
   test('handles empty text', () => {
     const result = textResult('');
     expect(result.content[0].text).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SOCKET_PATH
+// ---------------------------------------------------------------------------
+
+describe('SOCKET_PATH', () => {
+  test('ends with primary.sock', () => {
+    expect(SOCKET_PATH).toMatch(/primary\.sock$/);
+  });
+
+  test('is under CHANNELS_DIR', () => {
+    expect(SOCKET_PATH).toContain('.claude/channels/slack/');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getSessionLabel
+// ---------------------------------------------------------------------------
+
+describe('getSessionLabel', () => {
+  test('returns a non-empty string', () => {
+    const label = getSessionLabel();
+    expect(label.length).toBeGreaterThan(0);
+  });
+
+  test('includes basename of cwd', () => {
+    const cwd = process.cwd();
+    const base = cwd.split('/').pop()!;
+    const label = getSessionLabel();
+    expect(label).toContain(base);
+  });
+
+  test('includes git branch when in a git repo', () => {
+    // This test runs inside the claude-slack-channel repo,
+    // so it should have a branch name
+    const label = getSessionLabel();
+    expect(label).toContain(':');
+  });
+
+  test('strips backticks', () => {
+    const label = getSessionLabel();
+    expect(label).not.toContain('`');
+  });
+
+  test('does not exceed 60 characters', () => {
+    const label = getSessionLabel();
+    expect(label.length).toBeLessThanOrEqual(60);
   });
 });

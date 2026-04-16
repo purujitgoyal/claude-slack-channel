@@ -1,6 +1,7 @@
+import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -86,6 +87,35 @@ export const CHANNELS_DIR = join(homedir(), '.claude', 'channels', 'slack');
 export const ENV_PATH = join(CHANNELS_DIR, '.env');
 export const SESSION_PATH = join(CHANNELS_DIR, 'session.json');
 export const LOCK_PATH = join(CHANNELS_DIR, 'server.lock');
+export const SOCKET_PATH = join(CHANNELS_DIR, 'primary.sock');
+
+/**
+ * Returns a human-readable session label: `basename(cwd):git-branch`.
+ * Falls back to just `basename(cwd)` if not in a git repo or git fails.
+ * Sanitized: trimmed, backticks stripped, truncated to 60 chars.
+ */
+export function getSessionLabel(): string {
+  const cwd = process.cwd();
+  const base = basename(cwd);
+
+  let branch = '';
+  try {
+    const result = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd,
+      timeout: 3000,
+    });
+    if (result.status === 0 && result.stdout) {
+      branch = result.stdout.toString().trim();
+    }
+  } catch {
+    // Not a git repo or git not available — fall back to just basename
+  }
+
+  let label = branch ? `${base}:${branch}` : base;
+  label = label.replace(/`/g, '').trim();
+  if (label.length > 60) label = label.slice(0, 60);
+  return label;
+}
 
 export function ensureChannelsDir(): void {
   if (!existsSync(CHANNELS_DIR)) mkdirSync(CHANNELS_DIR, { recursive: true });

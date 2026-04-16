@@ -7,9 +7,12 @@ import { z } from 'zod';
 import {
   codePreviewBlock,
   formatInputPreview,
+  getSessionLabel,
   log,
+  SOCKET_PATH,
   textResult,
 } from './config.ts';
+import type { IPCClient } from './ipc.ts';
 import { LockHeldError } from './lock.ts';
 import {
   pendingPermissions,
@@ -40,6 +43,20 @@ function requireBridge(): SlackBridge {
   if (!bridge)
     throw new Error('SlackBridge not set — call setSlackBridge() first');
   return bridge;
+}
+
+// ---------------------------------------------------------------------------
+// IPC client — used in client mode to relay through the active session
+// ---------------------------------------------------------------------------
+
+let ipcClient: IPCClient | null = null;
+
+export function getIpcClient(): IPCClient | null {
+  return ipcClient;
+}
+
+export function setIpcClient(c: IPCClient | null): void {
+  ipcClient = c;
 }
 
 // ---------------------------------------------------------------------------
@@ -237,10 +254,31 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       return textResult('Connected to Slack.');
     } catch (err) {
       if (err instanceof LockHeldError) {
-        setMode('client');
-        return textResult(
-          'Connected as client \u2014 messages and permissions relay through the active session.',
-        );
+        try {
+          const { IPCClient: IPCClientClass } = await import('./ipc.ts');
+          const client = new IPCClientClass({
+            socketPath: SOCKET_PATH,
+            sessionId: crypto.randomUUID(),
+            label: getSessionLabel(),
+            onDisconnect: () => {
+              log('IPC client disconnected — degrading to dormant');
+              ipcClient = null;
+              setMode('dormant');
+            },
+          });
+          await client.connect();
+          ipcClient = client;
+          setMode('client');
+          return textResult(
+            'Connected as client \u2014 messages and permissions relay through the active session. You have your own thread.',
+          );
+        } catch (ipcErr) {
+          log(`IPC connect failed: ${ipcErr}`);
+          setMode('dormant');
+          return textResult(
+            'No active session found \u2014 call connect in another session first.',
+          );
+        }
       }
       throw err;
     }
@@ -248,6 +286,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (req.params.name === 'disconnect') {
     if (getMode() === 'dormant') return textResult('Not connected.');
+    if (getMode() === 'client') {
+      if (ipcClient) {
+        ipcClient.close();
+        ipcClient = null;
+      }
+      setMode('dormant');
+      return textResult('Disconnected from relay.');
+    }
     if (!injectedDeactivate) throw new Error('deactivate function not set');
     await injectedDeactivate();
     return textResult(

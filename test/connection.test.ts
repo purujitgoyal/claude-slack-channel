@@ -90,6 +90,43 @@ mock.module('@slack/bolt', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Mock ../src/ipc — dynamic import in connect handler, controls IPC client
+// ---------------------------------------------------------------------------
+
+let ipcConnectBehavior: 'success' | 'fail' = 'fail';
+const ipcClientCloseMock = mock(() => {});
+let ipcOnDisconnect: (() => void) | undefined;
+
+mock.module('../src/ipc', () => {
+  return {
+    IPCClient: class MockIPCClient {
+      opts: any;
+      constructor(opts: any) {
+        this.opts = opts;
+        ipcOnDisconnect = opts.onDisconnect;
+      }
+      async connect() {
+        if (ipcConnectBehavior === 'fail') {
+          throw new Error('Failed to connect');
+        }
+        return 'thread-ts-mock';
+      }
+      send = mock(() => {});
+      close = ipcClientCloseMock;
+    },
+    IPCServer: class MockIPCServer {
+      clients = new Map();
+      async start() {}
+      async close() {}
+      broadcastShutdown() {}
+      sendTo() {
+        return false;
+      }
+    },
+  };
+});
+
+// ---------------------------------------------------------------------------
 // Import modules under test (uses mocked @slack/bolt)
 // ---------------------------------------------------------------------------
 
@@ -103,7 +140,9 @@ const {
   setGetPpid,
   resetWatchdog,
 } = await import('../server');
-const { mcp, setMode, getMode, setActivate } = await import('../src/mcp');
+const { mcp, setMode, getMode, setActivate, setIpcClient } = await import(
+  '../src/mcp'
+);
 const { LockHeldError } = await import('../src/lock');
 const { setLastSeenEventTs } = await import('../src/session');
 
@@ -1036,8 +1075,9 @@ describe('connect tool', () => {
       expect(result.content[0].text).toBe('Connected to Slack.');
     });
 
-    test('catches LockHeldError, sets client mode, returns client message', async () => {
+    test('catches LockHeldError, IPC succeeds → sets client mode', async () => {
       setMode('dormant');
+      ipcConnectBehavior = 'success';
       setActivate(async () => {
         throw new LockHeldError();
       });
@@ -1048,7 +1088,27 @@ describe('connect tool', () => {
       });
       expect(getMode()).toBe('client');
       expect(result.content[0].text).toBe(
-        'Connected as client \u2014 messages and permissions relay through the active session.',
+        'Connected as client \u2014 messages and permissions relay through the active session. You have your own thread.',
+      );
+      // Clean up
+      ipcConnectBehavior = 'fail';
+      setIpcClient(null);
+    });
+
+    test('catches LockHeldError, IPC fails → stays dormant with error message', async () => {
+      setMode('dormant');
+      ipcConnectBehavior = 'fail';
+      setActivate(async () => {
+        throw new LockHeldError();
+      });
+
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(getMode()).toBe('dormant');
+      expect(result.content[0].text).toBe(
+        'No active session found \u2014 call connect in another session first.',
       );
     });
 
@@ -1064,6 +1124,81 @@ describe('connect tool', () => {
           params: { name: 'connect', arguments: {} },
         }),
       ).rejects.toThrow('SLACK_BOT_TOKEN not set');
+    });
+
+    test('IPC onDisconnect callback degrades to dormant', async () => {
+      setMode('dormant');
+      ipcConnectBehavior = 'success';
+      setActivate(async () => {
+        throw new LockHeldError();
+      });
+
+      await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(getMode()).toBe('client');
+
+      // Simulate server disconnect
+      ipcOnDisconnect?.();
+      expect(getMode()).toBe('dormant');
+
+      // Clean up
+      ipcConnectBehavior = 'fail';
+      setIpcClient(null);
+    });
+  });
+
+  // =========================================================================
+  // Disconnect handler — client mode
+  // =========================================================================
+
+  describe('disconnect handler — client mode', () => {
+    afterEach(() => {
+      setMode('dormant');
+      setIpcClient(null);
+      ipcClientCloseMock.mockClear();
+    });
+
+    test('disconnect in client mode closes IPC client, returns to dormant', async () => {
+      setMode('dormant');
+      ipcConnectBehavior = 'success';
+      setActivate(async () => {
+        throw new LockHeldError();
+      });
+
+      // Connect as client first
+      await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(getMode()).toBe('client');
+
+      ipcClientCloseMock.mockClear();
+
+      // Disconnect
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'disconnect', arguments: {} },
+      });
+      expect(getMode()).toBe('dormant');
+      expect(result.content[0].text).toBe('Disconnected from relay.');
+      expect(ipcClientCloseMock).toHaveBeenCalledTimes(1);
+
+      // Clean up
+      ipcConnectBehavior = 'fail';
+    });
+
+    test('disconnect in client mode without IPC client still returns to dormant', async () => {
+      setMode('client');
+      setIpcClient(null);
+
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'disconnect', arguments: {} },
+      });
+      expect(getMode()).toBe('dormant');
+      expect(result.content[0].text).toBe('Disconnected from relay.');
     });
   });
 });

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { ENV_PATH, loadEnv, log } from './src/config.ts';
+import { ENV_PATH, loadEnv, log, SOCKET_PATH } from './src/config.ts';
+import type { IPCServer } from './src/ipc.ts';
 import { LockHeldError, releaseLock, tryAcquireLock } from './src/lock.ts';
 import {
   isConnected,
@@ -55,6 +56,12 @@ export function resetWatchdog(): void {
 }
 
 let watchdogInterval: ReturnType<typeof setInterval> | null = null;
+let ipcServer: IPCServer | null = null;
+
+/** Reset the IPC server reference — exported for test cleanup only. */
+export function resetIpcServer(): void {
+  ipcServer = null;
+}
 
 /**
  * Start the parent-PID watchdog. Called inside activate() after tryAcquireLock().
@@ -131,10 +138,32 @@ async function activate(): Promise<void> {
       channelId,
     });
 
+    // Start IPC server for multi-session relay
+    const { IPCServer: IPCServerClass } = await import('./src/ipc.ts');
+    const server = new IPCServerClass({
+      socketPath: SOCKET_PATH,
+      poster: postThreaded,
+      messageUpdater: (channel, ts, text, blocks) =>
+        app.client.chat.update({ channel, ts, text, blocks }).then(() => {}),
+      reacter: (channel, emoji, ts) =>
+        app.client.reactions
+          .add({ channel, name: emoji, timestamp: ts })
+          .then(() => {}),
+      channelId,
+    });
+    await server.start();
+    ipcServer = server;
+
     setMode('connected');
     log(`channel activated — ${channelId}`);
   } catch (err) {
     log(`activation failed: ${err}`);
+    if (ipcServer) {
+      try {
+        await ipcServer.close();
+      } catch {}
+      ipcServer = null;
+    }
     if (watchdogInterval) {
       clearInterval(watchdogInterval);
       watchdogInterval = null;
@@ -153,6 +182,12 @@ setActivate(async () => {
 
 setDeactivate(async () => {
   log('deactivating');
+  if (ipcServer) {
+    try {
+      await ipcServer.close();
+    } catch {}
+    ipcServer = null;
+  }
   if (watchdogInterval) {
     clearInterval(watchdogInterval);
     watchdogInterval = null;
@@ -176,6 +211,16 @@ export function shutdownGracefully(reason?: string): void {
   // Idempotent: racing SIGTERM + SIGINT + stdin-close must not double-release
   if (shuttingDown) return;
   shuttingDown = true;
+
+  // Best-effort IPC server teardown — fire-and-forget close (broadcasts
+  // shutdown, closes sockets, unlinks socket file). Don't await or let it
+  // block the synchronous shutdown path.
+  if (ipcServer) {
+    try {
+      ipcServer.close().catch(() => {});
+    } catch {}
+    ipcServer = null;
+  }
 
   // Clear the watchdog interval so it stops firing during/after shutdown.
   if (watchdogInterval) {

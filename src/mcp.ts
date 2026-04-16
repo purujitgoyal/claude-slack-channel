@@ -12,7 +12,7 @@ import {
   SOCKET_PATH,
   textResult,
 } from './config.ts';
-import type { IPCClient } from './ipc.ts';
+import { IPCClient } from './ipc.ts';
 import { LockHeldError } from './lock.ts';
 import {
   pendingPermissions,
@@ -111,8 +111,8 @@ Inbound messages arrive as:
   <channel source="slack" slack_user_id="U01..." channel_id="C01..." event_ts="...">message text</channel>
 
 TOOLS:
-- connect: Call this first to activate the Slack bridge in this session. Only one session can be
-  connected at a time. Other sessions remain dormant until you call connect.
+- connect: Call this first. If no other session is active, you become the connected session.
+  If another session is already connected, you enter client mode (relay through it).
 - reply: Respond within the active thread. Use for replying to user messages and ongoing conversation.
 - new_thread: Start a fresh thread. Use to proactively reach the user (status updates, questions, alerts),
   or after /compact or /clear. Pass text to post the first message immediately.
@@ -177,7 +177,7 @@ export const mcp = new Server(
 const CONNECT_TOOL = {
   name: 'connect',
   description:
-    'Connect this session to the Slack channel. Only one session can be connected at a time. Call this before using reply/new_thread/react.',
+    'Connect this session to the Slack channel. If another session is already connected, enters client mode with relay. Call this before using reply/new_thread/react.',
   inputSchema: {
     type: 'object' as const,
     properties: {},
@@ -264,8 +264,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     } catch (err) {
       if (err instanceof LockHeldError) {
         try {
-          const { IPCClient: IPCClientClass } = await import('./ipc.ts');
-          const client = new IPCClientClass({
+          const client = new IPCClient({
             socketPath: SOCKET_PATH,
             sessionId: crypto.randomUUID(),
             label: getSessionLabel(),

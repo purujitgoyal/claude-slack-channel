@@ -184,6 +184,9 @@ setActivate(async () => {
 
 setDeactivate(async () => {
   log('deactivating');
+  try {
+    await postThreaded({ text: 'Session disconnected.' });
+  } catch {}
   if (ipcServer) {
     try {
       await ipcServer.close();
@@ -214,6 +217,12 @@ export function shutdownGracefully(reason?: string): void {
   // Idempotent: racing SIGTERM + SIGINT + stdin-close must not double-release
   if (shuttingDown) return;
   shuttingDown = true;
+
+  // Best-effort farewell message — fire-and-forget so it doesn't block
+  // the synchronous shutdown path.
+  if (isConnected()) {
+    postThreaded({ text: 'Session ended unexpectedly.' }).catch(() => {});
+  }
 
   // Best-effort IPC server teardown — fire-and-forget close (broadcasts
   // shutdown, closes sockets, unlinks socket file). Don't await or let it

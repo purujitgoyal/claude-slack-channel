@@ -1202,3 +1202,139 @@ describe('connect tool', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Farewell messages — posted on deactivate and shutdownGracefully
+// ---------------------------------------------------------------------------
+
+describe('farewell messages', () => {
+  const callTool = (mcp as any)._requestHandlers?.get('tools/call');
+  let origExit: typeof process.exit;
+  const exitMock = mock((_code?: number) => {});
+  const timers = new FakeTimers();
+
+  beforeEach(async () => {
+    resetShuttingDown();
+    origExit = process.exit;
+    (process as any).exit = exitMock;
+    exitMock.mockClear();
+    releaseLockMock.mockClear();
+    apps.length = 0;
+    timers.install();
+    await startSlack({
+      mcp: { notification: mock(async () => {}) } as any,
+      botToken: TEST_BOT_TOKEN,
+      appToken: TEST_APP_TOKEN,
+      channelId: TEST_CHANNEL_ID,
+      allowedUserId: TEST_ALLOWED_USER,
+      onDead: mock(() => {}),
+    });
+  });
+
+  afterEach(async () => {
+    timers.uninstall();
+    (process as any).exit = origExit;
+    resetShuttingDown();
+    setMode('dormant');
+    const currentApp = apps[apps.length - 1];
+    if (currentApp) {
+      currentApp.stop.mockImplementation(async () => {});
+    }
+    try {
+      await stopSlack();
+    } catch {
+      // ignore — may already be stopped
+    }
+  });
+
+  // =========================================================================
+  // deactivate (disconnect tool in server mode)
+  // =========================================================================
+
+  test('deactivate posts "Session disconnected." before teardown', async () => {
+    setMode('connected');
+    const currentApp = apps[apps.length - 1];
+    currentApp.client.chat.postMessage.mockClear();
+
+    await callTool({
+      method: 'tools/call',
+      params: { name: 'disconnect', arguments: {} },
+    });
+
+    const calls = currentApp.client.chat.postMessage.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls[0][0].text).toBe('Session disconnected.');
+  });
+
+  test('deactivate teardown proceeds even if farewell post fails', async () => {
+    setMode('connected');
+    const currentApp = apps[apps.length - 1];
+    currentApp.client.chat.postMessage.mockRejectedValueOnce(
+      new Error('Slack is down'),
+    );
+
+    // Should not throw; teardown completes and mode returns to dormant
+    await expect(
+      callTool({
+        method: 'tools/call',
+        params: { name: 'disconnect', arguments: {} },
+      }),
+    ).resolves.toBeDefined();
+
+    expect(getMode()).toBe('dormant');
+  });
+
+  // =========================================================================
+  // shutdownGracefully — fire-and-forget farewell
+  // =========================================================================
+
+  test('shutdownGracefully posts "Session ended unexpectedly." when connected', async () => {
+    setMode('connected');
+    const currentApp = apps[apps.length - 1];
+    currentApp.stop.mockImplementation(async () => {});
+    currentApp.client.chat.postMessage.mockClear();
+
+    shutdownGracefully('test');
+
+    // Flush microtasks so the fire-and-forget promise runs
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const calls = currentApp.client.chat.postMessage.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls[0][0].text).toBe('Session ended unexpectedly.');
+  });
+
+  test('shutdownGracefully does not post farewell when not connected', async () => {
+    setMode('dormant');
+    const currentApp = apps[apps.length - 1];
+    currentApp.stop.mockImplementation(async () => {});
+    currentApp.client.chat.postMessage.mockClear();
+
+    shutdownGracefully('test');
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(currentApp.client.chat.postMessage).not.toHaveBeenCalled();
+  });
+
+  test('shutdownGracefully teardown proceeds even if farewell post fails', async () => {
+    setMode('connected');
+    const currentApp = apps[apps.length - 1];
+    currentApp.stop.mockImplementation(async () => {});
+    currentApp.client.chat.postMessage.mockRejectedValueOnce(
+      new Error('Slack is down'),
+    );
+
+    // Should not throw synchronously
+    expect(() => shutdownGracefully('test')).not.toThrow();
+
+    // Let the rejected promise settle
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Teardown still ran: releaseLock was called
+    expect(releaseLockMock).toHaveBeenCalledTimes(1);
+  });
+});

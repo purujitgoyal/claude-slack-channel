@@ -282,6 +282,7 @@ export class IPCServer {
   readonly clients: Map<string, ClientEntry> = new Map();
   readonly permRouting: Map<string, PermRouteEntry> = new Map();
   private listener: ReturnType<typeof Bun.listen> | null = null;
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private readonly opts: IPCServerOptions;
 
   constructor(opts: IPCServerOptions) {
@@ -319,6 +320,49 @@ export class IPCServer {
         },
       },
     });
+
+    this.startSweep();
+  }
+
+  /** Start the periodic TTL sweep interval (every 60 seconds). */
+  private startSweep(): void {
+    this.sweepTimer = setInterval(() => {
+      this.runSweep().catch((err) => log(`TTL sweep error: ${err}`));
+    }, 60_000);
+    this.sweepTimer.unref();
+  }
+
+  /**
+   * Run one sweep pass: evict permRouting entries older than 30 minutes,
+   * updating the Slack message to indicate expiry.
+   * Exposed as public for direct invocation in tests.
+   */
+  async runSweep(): Promise<void> {
+    const ttl = 30 * 60 * 1000; // 30 minutes
+    const now = Date.now();
+    const expired: [string, PermRouteEntry][] = [];
+
+    for (const [requestId, entry] of this.permRouting) {
+      if (now - entry.timestamp > ttl) {
+        expired.push([requestId, entry]);
+      }
+    }
+
+    for (const [requestId, entry] of expired) {
+      try {
+        await this.opts.messageUpdater(
+          this.opts.channelId,
+          entry.slackTs,
+          'Permission expired — approve at the terminal if still needed.',
+          [],
+        );
+      } catch (err) {
+        log(
+          `TTL sweep: failed to update Slack message for ${requestId}: ${err}`,
+        );
+      }
+      this.permRouting.delete(requestId);
+    }
   }
 
   /** Handle incoming data from a client socket */
@@ -600,6 +644,12 @@ export class IPCServer {
 
   /** Close the server: broadcast shutdown, close all sockets, unlink file */
   async close(): Promise<void> {
+    // Clear the TTL sweep timer first
+    if (this.sweepTimer !== null) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
+
     this.broadcastShutdown();
 
     // Give clients a moment to receive shutdown before closing sockets

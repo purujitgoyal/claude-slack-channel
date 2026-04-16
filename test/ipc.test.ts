@@ -1037,3 +1037,140 @@ describe('routeVerdict', () => {
     expect(result.routed).toBe(false);
   });
 });
+
+// ── TTL Sweep Tests ─────────────────────────────────────────────────────
+
+describe('IPCServer TTL sweep', () => {
+  let server: IPCServer;
+  let sockPath: string;
+  let posterMock: ReturnType<typeof mock>;
+  let messageUpdaterMock: ReturnType<typeof mock>;
+  let reacterMock: ReturnType<typeof mock>;
+
+  beforeEach(() => {
+    sockPath = tmpSock();
+    posterMock = mock(async () => `thread-ts-${randomUUID()}`);
+    messageUpdaterMock = mock(async () => {});
+    reacterMock = mock(async () => {});
+    server = new IPCServer({
+      socketPath: sockPath,
+      poster: posterMock as any,
+      messageUpdater: messageUpdaterMock as any,
+      reacter: reacterMock as any,
+      channelId: 'C-test',
+    });
+  });
+
+  afterEach(async () => {
+    try {
+      await server.close();
+    } catch {
+      // already closed
+    }
+    try {
+      if (existsSync(sockPath)) unlinkSync(sockPath);
+    } catch {
+      // ignore
+    }
+  });
+
+  test('entry older than 30 minutes is evicted on sweep', async () => {
+    await server.start();
+
+    // Add a stale entry (older than 30 min)
+    server.permRouting.set('req-stale', {
+      sessionId: 'sess-1',
+      slackTs: 'slack-ts-stale',
+      timestamp: Date.now() - 31 * 60 * 1000,
+      toolName: 'Bash',
+      description: 'Run a command',
+      inputPreview: 'git status',
+    });
+
+    // Trigger the sweep manually
+    await server.runSweep();
+
+    expect(server.permRouting.has('req-stale')).toBe(false);
+  });
+
+  test('on eviction, messageUpdater is called with expired text and empty blocks', async () => {
+    await server.start();
+
+    server.permRouting.set('req-stale', {
+      sessionId: 'sess-1',
+      slackTs: 'slack-ts-stale',
+      timestamp: Date.now() - 31 * 60 * 1000,
+      toolName: 'Bash',
+      description: 'Run a command',
+      inputPreview: 'git status',
+    });
+
+    await server.runSweep();
+
+    expect(messageUpdaterMock).toHaveBeenCalledTimes(1);
+    const [channel, ts, text, blocks] = messageUpdaterMock.mock.calls[0];
+    expect(channel).toBe('C-test');
+    expect(ts).toBe('slack-ts-stale');
+    expect(text).toContain('expired');
+    expect(blocks).toEqual([]);
+  });
+
+  test('entry younger than 30 minutes survives the sweep', async () => {
+    await server.start();
+
+    // Add a fresh entry (only 5 min old)
+    server.permRouting.set('req-fresh', {
+      sessionId: 'sess-1',
+      slackTs: 'slack-ts-fresh',
+      timestamp: Date.now() - 5 * 60 * 1000,
+      toolName: 'Bash',
+      description: 'Run a command',
+      inputPreview: 'git status',
+    });
+
+    await server.runSweep();
+
+    expect(server.permRouting.has('req-fresh')).toBe(true);
+    expect(messageUpdaterMock).not.toHaveBeenCalled();
+  });
+
+  test('sweep evicts stale entries but preserves fresh ones', async () => {
+    await server.start();
+
+    server.permRouting.set('req-stale', {
+      sessionId: 'sess-1',
+      slackTs: 'slack-ts-stale',
+      timestamp: Date.now() - 31 * 60 * 1000,
+      toolName: 'Bash',
+      description: 'Stale command',
+      inputPreview: 'old cmd',
+    });
+
+    server.permRouting.set('req-fresh', {
+      sessionId: 'sess-1',
+      slackTs: 'slack-ts-fresh',
+      timestamp: Date.now() - 5 * 60 * 1000,
+      toolName: 'Read',
+      description: 'Fresh command',
+      inputPreview: 'new cmd',
+    });
+
+    await server.runSweep();
+
+    expect(server.permRouting.has('req-stale')).toBe(false);
+    expect(server.permRouting.has('req-fresh')).toBe(true);
+    expect(messageUpdaterMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('sweep interval is cleared on server close', async () => {
+    await server.start();
+
+    // Verify sweepTimer is set after start
+    expect((server as any).sweepTimer).not.toBeNull();
+
+    await server.close();
+
+    // After close, sweepTimer should be null/cleared
+    expect((server as any).sweepTimer).toBeNull();
+  });
+});

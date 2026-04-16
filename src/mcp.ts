@@ -303,6 +303,37 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (getMode() === 'dormant')
     throw new Error('slack channel is not active — call connect first');
+
+  // ── Client mode: forward tool calls over IPC ──
+  if (getMode() === 'client') {
+    if (!ipcClient)
+      throw new Error('Slack relay lost — call connect to reconnect.');
+
+    if (req.params.name === 'reply') {
+      const { text } = req.params.arguments as { text: string };
+      await ipcClient.sendMessage(text);
+      return textResult('sent');
+    }
+
+    if (req.params.name === 'react') {
+      const { emoji, event_ts } = req.params.arguments as {
+        emoji: string;
+        event_ts: string;
+      };
+      await ipcClient.addReaction(emoji, event_ts);
+      return textResult('reacted');
+    }
+
+    if (req.params.name === 'new_thread') {
+      const { text } = (req.params.arguments ?? {}) as { text?: string };
+      await ipcClient.newThread(text);
+      return textResult('New thread started.');
+    }
+
+    throw new Error(`unknown tool: ${req.params.name}`);
+  }
+
+  // ── Connected mode: use the local Slack bridge directly ──
   const b = requireBridge();
 
   if (req.params.name === 'reply') {

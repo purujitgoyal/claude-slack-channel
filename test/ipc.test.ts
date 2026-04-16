@@ -433,6 +433,153 @@ describe('IPCServer', () => {
     await server.close();
     expect(existsSync(sockPath)).toBe(false);
   });
+
+  // ── Server-side message relay tests ──────────────────────────────────
+
+  test('send_message calls poster with client threadTs', async () => {
+    await server.start();
+    const clientThreadTs = '1234567890.000100';
+    posterMock.mockResolvedValueOnce(clientThreadTs); // register
+    posterMock.mockResolvedValueOnce('msg-ts-1'); // send_message reply
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test-session',
+    });
+    await client.connect();
+
+    // Send a message via the low-level send method to exercise server handling
+    const ackPromise = new Promise<any>((resolve) => {
+      // Override onMessage to capture the ack
+      client['opts'].onMessage = (msg) => {
+        if (msg.type === 'send_ack') resolve(msg);
+      };
+    });
+
+    client.send({
+      type: 'send_message',
+      requestId: 'req-1',
+      text: 'hello from client',
+    });
+
+    const ack = await ackPromise;
+    expect(ack.type).toBe('send_ack');
+    expect(ack.requestId).toBe('req-1');
+    expect(ack.ts).toBe('msg-ts-1');
+
+    // Verify poster was called with the client's thread_ts
+    expect(posterMock).toHaveBeenCalledTimes(2);
+    const sendCall = posterMock.mock.calls[1][0];
+    expect(sendCall.text).toBe('hello from client');
+    expect(sendCall.thread_ts).toBe(clientThreadTs);
+
+    client.close();
+  });
+
+  test('new_thread updates client threadTs in server map', async () => {
+    await server.start();
+    posterMock
+      .mockResolvedValueOnce('old-thread-ts') // register
+      .mockResolvedValueOnce('new-thread-ts'); // new_thread
+
+    const ackReceived = new Promise<any>((resolve) => {
+      const c = new IPCClient({
+        socketPath: sockPath,
+        sessionId: 'sess-1',
+        label: 'test-session',
+        onMessage: (msg) => {
+          if (msg.type === 'new_thread_ack') resolve(msg);
+        },
+      });
+      c.connect().then(() => {
+        c.send({
+          type: 'new_thread',
+          requestId: 'req-nt',
+          text: 'fresh start',
+        });
+      });
+    });
+
+    const ack = await ackReceived;
+    expect(ack.type).toBe('new_thread_ack');
+    expect(ack.requestId).toBe('req-nt');
+    expect(ack.threadTs).toBe('new-thread-ts');
+
+    // Verify the map was updated
+    expect(server.clients.get('sess-1')!.threadTs).toBe('new-thread-ts');
+  });
+
+  test('react calls reacter with channelId, emoji, eventTs', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1'); // register
+
+    const ackReceived = new Promise<any>((resolve) => {
+      const c = new IPCClient({
+        socketPath: sockPath,
+        sessionId: 'sess-1',
+        label: 'test-session',
+        onMessage: (msg) => {
+          if (msg.type === 'react_ack') resolve(msg);
+        },
+      });
+      c.connect().then(() => {
+        c.send({
+          type: 'react',
+          requestId: 'req-r',
+          emoji: 'eyes',
+          eventTs: '9999.0001',
+        });
+      });
+    });
+
+    const ack = await ackReceived;
+    expect(ack.type).toBe('react_ack');
+    expect(ack.requestId).toBe('req-r');
+
+    expect(reacterMock).toHaveBeenCalledTimes(1);
+    expect(reacterMock).toHaveBeenCalledWith('C-test', 'eyes', '9999.0001');
+  });
+
+  test('send_message from unregistered client returns error', async () => {
+    await server.start();
+
+    // Connect raw — we'll send send_message before registering
+    const errorReceived = new Promise<any>((resolve) => {
+      Bun.connect<{ lineBuffer: LineBuffer }>({
+        unix: sockPath,
+        socket: {
+          open: (socket) => {
+            socket.data = { lineBuffer: new LineBuffer() };
+            // Send send_message without registering first
+            socket.write(
+              encode({
+                type: 'send_message',
+                requestId: 'req-1',
+                text: 'hello',
+              }),
+            );
+          },
+          data: (socket, data) => {
+            const msgs = socket.data.lineBuffer.feed(data as Buffer);
+            for (const msg of msgs) {
+              if (msg.type === 'error') resolve(msg);
+            }
+          },
+          close: () => {},
+          error: () => {},
+        },
+      });
+    });
+
+    const err = await Promise.race([
+      errorReceived,
+      delay(2000).then(() => null),
+    ]);
+    expect(err).not.toBeNull();
+    expect(err.type).toBe('error');
+    expect(err.message).toContain('Not registered');
+  });
 });
 
 describe('IPCClient', () => {
@@ -557,16 +704,180 @@ describe('IPCClient', () => {
     });
     await client.connect();
 
-    // send a message — this exercises the write path; server ignores unknown request
-    // but it should not throw
-    client.send({
-      type: 'send_message',
-      requestId: 'req-1',
-      text: 'hello from client',
-    });
-
-    // No crash means success
-    await delay(50);
+    // send a message and await the ack via sendMessage helper
+    const ts = await client.sendMessage('hello from client');
+    expect(typeof ts).toBe('string');
     client.close();
+  });
+
+  test('sendMessage resolves with ts from send_ack', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1'); // register
+    posterMock.mockResolvedValueOnce('msg-ts-1'); // send_message
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+
+    const ts = await client.sendMessage('hello');
+    expect(ts).toBe('msg-ts-1');
+
+    // Poster was called with client's thread_ts
+    const sendCall = posterMock.mock.calls[1][0];
+    expect(sendCall.text).toBe('hello');
+    expect(sendCall.thread_ts).toBe('ts-1');
+
+    client.close();
+  });
+
+  test('newThread resolves with new threadTs from ack', async () => {
+    await server.start();
+    posterMock
+      .mockResolvedValueOnce('ts-1') // register
+      .mockResolvedValueOnce('new-thread-ts'); // new_thread
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+
+    const threadTs = await client.newThread('starting fresh');
+    expect(threadTs).toBe('new-thread-ts');
+
+    // Poster was called with the new thread text (no thread_ts — new top-level msg)
+    const newThreadCall = posterMock.mock.calls[1][0];
+    expect(newThreadCall.text).toBe('starting fresh');
+    expect(newThreadCall.thread_ts).toBeUndefined();
+
+    client.close();
+  });
+
+  test('newThread updates client threadTs in server map', async () => {
+    await server.start();
+    posterMock
+      .mockResolvedValueOnce('ts-1') // register
+      .mockResolvedValueOnce('new-thread-ts'); // new_thread
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+    expect(server.clients.get('sess-1')!.threadTs).toBe('ts-1');
+
+    await client.newThread('fresh');
+    expect(server.clients.get('sess-1')!.threadTs).toBe('new-thread-ts');
+
+    client.close();
+  });
+
+  test('addReaction resolves on react_ack', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1'); // register
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+
+    await client.addReaction('thumbsup', '1234.5678');
+
+    expect(reacterMock).toHaveBeenCalledTimes(1);
+    expect(reacterMock).toHaveBeenCalledWith('C-test', 'thumbsup', '1234.5678');
+
+    client.close();
+  });
+
+  test('server-side error on send_message sends error to client', async () => {
+    await server.start();
+    posterMock
+      .mockResolvedValueOnce('ts-1') // register
+      .mockRejectedValueOnce(new Error('Slack API down')); // send_message
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+
+    await expect(client.sendMessage('hello')).rejects.toThrow(
+      'send_message failed',
+    );
+
+    client.close();
+  });
+
+  test('server-side error on react sends error to client', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1'); // register
+    reacterMock.mockRejectedValueOnce(new Error('invalid_name'));
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+
+    await expect(client.addReaction('badname', '1234.5678')).rejects.toThrow(
+      'react failed',
+    );
+
+    client.close();
+  });
+
+  test('subsequent sendMessage posts in updated thread after newThread', async () => {
+    await server.start();
+    posterMock
+      .mockResolvedValueOnce('ts-1') // register
+      .mockResolvedValueOnce('new-ts') // new_thread
+      .mockResolvedValueOnce('msg-ts'); // send_message
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+
+    await client.newThread('fresh thread');
+    await client.sendMessage('follow-up');
+
+    // The send_message should post in the new thread
+    const sendCall = posterMock.mock.calls[2][0];
+    expect(sendCall.thread_ts).toBe('new-ts');
+
+    client.close();
+  });
+
+  test('close rejects all pending requests', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1'); // register
+    // Don't resolve the send_message poster — let it hang
+    posterMock.mockImplementationOnce(
+      () => new Promise(() => {}), // never resolves
+    );
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+
+    const sendPromise = client.sendMessage('hello');
+    // Close immediately — should reject the pending request
+    client.close();
+
+    await expect(sendPromise).rejects.toThrow();
   });
 });

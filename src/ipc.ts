@@ -318,10 +318,19 @@ export class IPCServer {
         this.handleRegister(socket, msg as RegisterMessage).catch((err) =>
           log(`register handler error: ${err}`),
         );
+      } else if (msg.type === 'send_message') {
+        this.handleSendMessage(socket, msg as SendMessageMessage).catch((err) =>
+          log(`send_message handler error: ${err}`),
+        );
+      } else if (msg.type === 'new_thread') {
+        this.handleNewThread(socket, msg as NewThreadMessage).catch((err) =>
+          log(`new_thread handler error: ${err}`),
+        );
+      } else if (msg.type === 'react') {
+        this.handleReact(socket, msg as ReactMessage).catch((err) =>
+          log(`react handler error: ${err}`),
+        );
       }
-      // Other message types (send_message, new_thread, react, perm_request,
-      // unregister) will be handled by later tasks that wire up the full
-      // message dispatch. For now, register is the only handled type.
     }
   }
 
@@ -362,6 +371,133 @@ export class IPCServer {
       const errMsg: ErrorMessage = {
         type: 'error',
         message: `Register failed: ${err}`,
+      };
+      socket.write(encode(errMsg));
+    }
+  }
+
+  /** Handle a send_message request: post text in the client's thread, send ack */
+  private async handleSendMessage(
+    socket: BunSocket<SocketContext>,
+    msg: SendMessageMessage,
+  ): Promise<void> {
+    const sessionId = socket.data.sessionId;
+    const client = sessionId ? this.clients.get(sessionId) : undefined;
+
+    if (!client) {
+      const errMsg: ErrorMessage = {
+        type: 'error',
+        requestId: msg.requestId,
+        message: 'Not registered',
+      };
+      socket.write(encode(errMsg));
+      return;
+    }
+
+    try {
+      const ts = await this.opts.poster({
+        text: msg.text,
+        thread_ts: client.threadTs,
+      });
+
+      const ack: SendAckMessage = {
+        type: 'send_ack',
+        requestId: msg.requestId,
+        ts: ts ?? '',
+      };
+      socket.write(encode(ack));
+    } catch (err) {
+      const errMsg: ErrorMessage = {
+        type: 'error',
+        requestId: msg.requestId,
+        message: `send_message failed: ${err}`,
+      };
+      socket.write(encode(errMsg));
+    }
+  }
+
+  /** Handle a new_thread request: create a new thread for the client, send ack */
+  private async handleNewThread(
+    socket: BunSocket<SocketContext>,
+    msg: NewThreadMessage,
+  ): Promise<void> {
+    const sessionId = socket.data.sessionId;
+    const client = sessionId ? this.clients.get(sessionId) : undefined;
+
+    if (!client) {
+      const errMsg: ErrorMessage = {
+        type: 'error',
+        requestId: msg.requestId,
+        message: 'Not registered',
+      };
+      socket.write(encode(errMsg));
+      return;
+    }
+
+    try {
+      // Create a new thread header for this client
+      const threadTs = await this.opts.poster({
+        text: msg.text ?? `📡 Session continued: ${client.label}`,
+      });
+
+      if (!threadTs) {
+        const errMsg: ErrorMessage = {
+          type: 'error',
+          requestId: msg.requestId,
+          message: 'Failed to create new thread — poster returned no ts',
+        };
+        socket.write(encode(errMsg));
+        return;
+      }
+
+      // Update the client's threadTs in the connection map
+      client.threadTs = threadTs;
+
+      const ack: NewThreadAckMessage = {
+        type: 'new_thread_ack',
+        requestId: msg.requestId,
+        threadTs,
+      };
+      socket.write(encode(ack));
+    } catch (err) {
+      const errMsg: ErrorMessage = {
+        type: 'error',
+        requestId: msg.requestId,
+        message: `new_thread failed: ${err}`,
+      };
+      socket.write(encode(errMsg));
+    }
+  }
+
+  /** Handle a react request: add an emoji reaction, send ack */
+  private async handleReact(
+    socket: BunSocket<SocketContext>,
+    msg: ReactMessage,
+  ): Promise<void> {
+    const sessionId = socket.data.sessionId;
+    if (!sessionId || !this.clients.has(sessionId)) {
+      const errMsg: ErrorMessage = {
+        type: 'error',
+        requestId: msg.requestId,
+        message: 'Not registered',
+      };
+      socket.write(encode(errMsg));
+      return;
+    }
+
+    try {
+      await this.opts.reacter(this.opts.channelId, msg.emoji, msg.eventTs);
+
+      const ack: ReactAckMessage = {
+        type: 'react_ack',
+        requestId: msg.requestId,
+      };
+      socket.write(encode(ack));
+    } catch (err) {
+      const errMsg: ErrorMessage = {
+        type: 'error',
+        requestId: msg.requestId,
+        message: `react failed: ${err}`,
       };
       socket.write(encode(errMsg));
     }
@@ -446,13 +582,24 @@ export interface IPCClientOptions {
   connectTimeoutMs?: number;
 }
 
+/** Default timeout for IPC request/response round-trips (30 seconds). */
+const IPC_REQUEST_TIMEOUT = 30_000;
+
 /**
  * IPC Client — connects to a Unix domain socket, sends register,
  * and resolves when register_ack is received.
+ *
+ * Also provides request/response helpers (sendMessage, newThread,
+ * addReaction) that generate a requestId, send a message, and return
+ * a promise that resolves when a matching ack arrives from the server.
  */
 export class IPCClient {
   private socket: BunSocket<{ lineBuffer: LineBuffer }> | null = null;
   private readonly opts: IPCClientOptions;
+  private pending = new Map<
+    string,
+    { resolve: (msg: ServerMessage) => void; reject: (err: Error) => void }
+  >();
 
   constructor(opts: IPCClientOptions) {
     this.opts = opts;
@@ -498,6 +645,19 @@ export class IPCClient {
           data: (socket, data) => {
             const messages = socket.data.lineBuffer.feed(data as Buffer);
             for (const msg of messages) {
+              // Check if this is a response to a pending request
+              const reqId = (msg as any).requestId as string | undefined;
+              if (reqId && this.pending.has(reqId)) {
+                const entry = this.pending.get(reqId)!;
+                this.pending.delete(reqId);
+                if (msg.type === 'error') {
+                  entry.reject(new Error((msg as ErrorMessage).message));
+                } else {
+                  entry.resolve(msg as ServerMessage);
+                }
+                continue;
+              }
+
               // Dispatch to onMessage callback
               this.opts.onMessage?.(msg as ServerMessage);
 
@@ -508,6 +668,11 @@ export class IPCClient {
           },
           close: () => {
             this.socket = null;
+            // Reject all pending requests
+            for (const entry of this.pending.values()) {
+              entry.reject(new Error('IPC connection closed'));
+            }
+            this.pending.clear();
             settle(() => reject(new Error('IPC connection closed before ack')));
             this.opts.onDisconnect?.();
           },
@@ -532,11 +697,92 @@ export class IPCClient {
     this.socket.write(encode(msg));
   }
 
+  /**
+   * Send a message via the connected session's Slack bridge.
+   * Returns the Slack message `ts` from the ack.
+   */
+  async sendMessage(text: string): Promise<string> {
+    const requestId = crypto.randomUUID();
+    const ack = await this.request(requestId, {
+      type: 'send_message',
+      requestId,
+      text,
+    });
+    return (ack as SendAckMessage).ts;
+  }
+
+  /**
+   * Start a new thread via the connected session's Slack bridge.
+   * Returns the new thread's `threadTs` from the ack.
+   */
+  async newThread(text?: string): Promise<string> {
+    const requestId = crypto.randomUUID();
+    const ack = await this.request(requestId, {
+      type: 'new_thread',
+      requestId,
+      text,
+    });
+    return (ack as NewThreadAckMessage).threadTs;
+  }
+
+  /**
+   * Add a reaction to a Slack message via the connected session's bridge.
+   */
+  async addReaction(emoji: string, eventTs: string): Promise<void> {
+    const requestId = crypto.randomUUID();
+    await this.request(requestId, {
+      type: 'react',
+      requestId,
+      emoji,
+      eventTs,
+    });
+  }
+
+  /**
+   * Send a client message and wait for a matching ack (by requestId).
+   * Rejects after IPC_REQUEST_TIMEOUT if no ack arrives.
+   */
+  private request(
+    requestId: string,
+    msg: ClientMessage,
+  ): Promise<ServerMessage> {
+    return new Promise<ServerMessage>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(requestId);
+        reject(new Error('IPC request timed out'));
+      }, IPC_REQUEST_TIMEOUT);
+
+      this.pending.set(requestId, {
+        resolve: (ack) => {
+          clearTimeout(timer);
+          resolve(ack);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      });
+
+      try {
+        this.send(msg);
+      } catch (err) {
+        clearTimeout(timer);
+        this.pending.delete(requestId);
+        reject(err);
+      }
+    });
+  }
+
   /** Close the client connection */
   close(): void {
     if (this.socket) {
       this.socket.end();
       this.socket = null;
     }
+    // Reject all pending requests
+    for (const entry of this.pending.values()) {
+      entry.reject(new Error('IPC client closed'));
+    }
+    this.pending.clear();
   }
 }

@@ -42,7 +42,20 @@ export function resetBotUserId(): void {
 export async function postThreaded(opts: {
   text: string;
   blocks?: any[];
+  thread_ts?: string;
 }): Promise<string | undefined> {
+  // If an explicit thread_ts is provided (e.g. posting on behalf of an IPC
+  // client), use it directly — skip the active-thread state machine entirely.
+  if (opts.thread_ts) {
+    const result = await bolt!.client.chat.postMessage({
+      channel: channelId,
+      text: opts.text,
+      blocks: opts.blocks,
+      thread_ts: opts.thread_ts,
+    });
+    return result.ts;
+  }
+
   const activeThreadTs = getActiveThreadTs();
   const result = await bolt!.client.chat.postMessage({
     channel: channelId,

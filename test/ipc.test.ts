@@ -1417,3 +1417,273 @@ describe('IPCServer TTL sweep', () => {
     expect((server as any).sweepTimer).toBeNull();
   });
 });
+
+// ── Multi-session IPC end-to-end integration ────────────────────────────
+//
+// These tests exercise higher-level IPC flows end-to-end:
+// real Unix sockets, mocked Slack poster/reacter/messageUpdater.
+// NOT gated on INTEGRATION env var — they run with `bun test`.
+
+describe('Multi-session IPC integration', () => {
+  let server: IPCServer;
+  let sockPath: string;
+  let posterMock: ReturnType<typeof mock>;
+  let messageUpdaterMock: ReturnType<typeof mock>;
+  let reacterMock: ReturnType<typeof mock>;
+
+  beforeEach(() => {
+    sockPath = tmpSock();
+    posterMock = mock(async () => `thread-ts-${randomUUID()}`);
+    messageUpdaterMock = mock(async () => {});
+    reacterMock = mock(async () => {});
+    server = new IPCServer({
+      socketPath: sockPath,
+      poster: posterMock as any,
+      messageUpdater: messageUpdaterMock as any,
+      reacter: reacterMock as any,
+      channelId: 'C_TEST',
+    });
+    setActiveServer(server);
+  });
+
+  afterEach(async () => {
+    setActiveServer(null);
+    try {
+      await server.close();
+    } catch {
+      // already closed
+    }
+    try {
+      if (existsSync(sockPath)) unlinkSync(sockPath);
+    } catch {
+      // ignore
+    }
+  });
+
+  test('full IPC round-trip: register → register_ack with threadTs', async () => {
+    await server.start();
+    const expectedTs = '1700000000.000001';
+    posterMock.mockResolvedValueOnce(expectedTs);
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'e2e-sess-1',
+      label: 'e2e-test',
+    });
+
+    const threadTs = await client.connect();
+    expect(threadTs).toBe(expectedTs);
+    expect(server.clients.size).toBe(1);
+    expect(server.clients.get('e2e-sess-1')!.threadTs).toBe(expectedTs);
+
+    client.close();
+  });
+
+  test('message relay: sendMessage → poster called → send_ack with ts', async () => {
+    await server.start();
+    const clientThreadTs = '1700000000.000001';
+    posterMock
+      .mockResolvedValueOnce(clientThreadTs) // register
+      .mockResolvedValueOnce('msg-ts-42'); // send_message
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'e2e-sess-1',
+      label: 'e2e-test',
+    });
+    await client.connect();
+
+    const ts = await client.sendMessage('hello from e2e');
+    expect(ts).toBe('msg-ts-42');
+
+    // Verify poster was invoked with the correct thread_ts and text
+    expect(posterMock).toHaveBeenCalledTimes(2);
+    const sendCall = posterMock.mock.calls[1][0];
+    expect(sendCall.text).toBe('hello from e2e');
+    expect(sendCall.thread_ts).toBe(clientThreadTs);
+
+    client.close();
+  });
+
+  test('new thread: newThread → poster creates top-level msg → client threadTs updated', async () => {
+    await server.start();
+    posterMock
+      .mockResolvedValueOnce('old-ts') // register
+      .mockResolvedValueOnce('new-ts'); // new_thread
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'e2e-sess-1',
+      label: 'e2e-test',
+    });
+    await client.connect();
+    expect(server.clients.get('e2e-sess-1')!.threadTs).toBe('old-ts');
+
+    const newTs = await client.newThread('status update');
+    expect(newTs).toBe('new-ts');
+
+    // Server map should reflect the new threadTs
+    expect(server.clients.get('e2e-sess-1')!.threadTs).toBe('new-ts');
+
+    // Poster was called without thread_ts (top-level message)
+    const newThreadCall = posterMock.mock.calls[1][0];
+    expect(newThreadCall.text).toBe('status update');
+    expect(newThreadCall.thread_ts).toBeUndefined();
+
+    client.close();
+  });
+
+  test('permission relay: sendPermRequest → poster posts Block Kit → perm_response fires callback', async () => {
+    await server.start();
+    posterMock
+      .mockResolvedValueOnce('thread-ts-1') // register
+      .mockResolvedValueOnce('perm-slack-ts'); // perm_request poster
+
+    const permResponseReceived = new Promise<{
+      requestId: string;
+      behavior: string;
+    }>((resolve) => {
+      const client = new IPCClient({
+        socketPath: sockPath,
+        sessionId: 'e2e-sess-1',
+        label: 'e2e-test',
+        onPermResponse: (requestId, behavior) =>
+          resolve({ requestId, behavior }),
+      });
+      client.connect().then(() => {
+        // Send perm request
+        client.sendPermRequest(
+          'perm-req-1',
+          'Bash',
+          'Run a shell command',
+          'ls -la /tmp',
+        );
+      });
+    });
+
+    // Wait for server to process the perm request and post to Slack
+    await delay(200);
+
+    // Verify poster was called with Block Kit buttons in the client's thread
+    expect(posterMock).toHaveBeenCalledTimes(2);
+    const permCall = posterMock.mock.calls[1][0];
+    expect(permCall.text).toContain('Bash');
+    expect(permCall.thread_ts).toBe('thread-ts-1');
+    expect(permCall.blocks).toBeDefined();
+
+    // Verify permRouting was populated
+    expect(server.permRouting.has('perm-req-1')).toBe(true);
+    expect(server.permRouting.get('perm-req-1')!.sessionId).toBe('e2e-sess-1');
+
+    // Now route the verdict back — simulates Slack button press
+    const result = routeVerdict('perm-req-1', 'allow');
+    expect(result.routed).toBe(true);
+
+    // Client should receive the perm_response via onPermResponse
+    const resp = await Promise.race([
+      permResponseReceived,
+      delay(2000).then(() => null),
+    ]);
+    expect(resp).not.toBeNull();
+    expect(resp!.requestId).toBe('perm-req-1');
+    expect(resp!.behavior).toBe('allow');
+  });
+
+  test('verdict routing: routeVerdict → client receives perm_response', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1'); // register
+
+    const permResponseReceived = new Promise<{
+      requestId: string;
+      behavior: string;
+    }>((resolve) => {
+      const client = new IPCClient({
+        socketPath: sockPath,
+        sessionId: 'e2e-sess-1',
+        label: 'e2e-test',
+        onPermResponse: (requestId, behavior) =>
+          resolve({ requestId, behavior }),
+      });
+      client.connect();
+    });
+
+    await delay(100);
+
+    // Populate permRouting manually (simulates a perm_request that was already posted)
+    server.permRouting.set('verdict-req-1', {
+      sessionId: 'e2e-sess-1',
+      slackTs: '5000.0001',
+      timestamp: Date.now(),
+      toolName: 'Edit',
+      description: 'Edit a file',
+      inputPreview: 'src/foo.ts',
+    });
+
+    const result = routeVerdict('verdict-req-1', 'deny');
+    expect(result.routed).toBe(true);
+    if (result.routed) {
+      expect(result.details.toolName).toBe('Edit');
+      expect(result.details.description).toBe('Edit a file');
+      expect(result.details.inputPreview).toBe('src/foo.ts');
+    }
+
+    // permRouting entry should be removed after routing
+    expect(server.permRouting.has('verdict-req-1')).toBe(false);
+
+    // Client should receive the perm_response
+    const resp = await Promise.race([
+      permResponseReceived,
+      delay(2000).then(() => null),
+    ]);
+    expect(resp).not.toBeNull();
+    expect(resp!.requestId).toBe('verdict-req-1');
+    expect(resp!.behavior).toBe('deny');
+  });
+
+  test('graceful shutdown: server close → client receives shutdown → onDisconnect fires with graceful: true', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1');
+
+    const disconnectInfo = new Promise<{ graceful: boolean }>((resolve) => {
+      const client = new IPCClient({
+        socketPath: sockPath,
+        sessionId: 'e2e-sess-1',
+        label: 'e2e-test',
+        onDisconnect: (info) => resolve(info),
+      });
+      client.connect();
+    });
+
+    await delay(100);
+    expect(server.clients.size).toBe(1);
+
+    // Server close broadcasts shutdown then terminates connections
+    await server.close();
+
+    const got = await Promise.race([
+      disconnectInfo,
+      delay(2000).then(() => null),
+    ]);
+    expect(got).not.toBeNull();
+    expect(got!.graceful).toBe(true);
+  });
+
+  test('client disconnect: close sends unregister → server removes from map', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1');
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'e2e-sess-1',
+      label: 'e2e-test',
+    });
+    await client.connect();
+    expect(server.clients.size).toBe(1);
+
+    client.close();
+    await delay(200);
+
+    expect(server.clients.size).toBe(0);
+    expect(server.clients.has('e2e-sess-1')).toBe(false);
+  });
+});

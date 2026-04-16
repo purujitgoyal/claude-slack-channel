@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ENV_PATH, loadEnv, log, SOCKET_PATH } from './src/config.ts';
-import { type IPCServer, setActiveServer } from './src/ipc.ts';
+import { IPCServer, setActiveServer } from './src/ipc.ts';
 import { LockHeldError, releaseLock, tryAcquireLock } from './src/lock.ts';
 import {
   isConnected,
@@ -78,6 +78,27 @@ export function startWatchdog(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Teardown helpers — shared by activate catch, setDeactivate, shutdownGracefully
+// ---------------------------------------------------------------------------
+
+async function teardownIpc(): Promise<void> {
+  if (ipcServer) {
+    try {
+      await ipcServer.close();
+    } catch {}
+    ipcServer = null;
+    setActiveServer(null);
+  }
+}
+
+function clearWatchdog(): void {
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Lazy activation — only when client negotiates claude/channel support
 // ---------------------------------------------------------------------------
 
@@ -129,26 +150,24 @@ async function activate(): Promise<void> {
       onDead: () => shutdownGracefully('slack-dead'),
     });
 
+    const addReaction = (ch: string, name: string, ts: string) =>
+      app.client.reactions
+        .add({ channel: ch, name, timestamp: ts })
+        .then(() => {});
+
     setSlackBridge({
       postThreaded,
-      addReaction: (ch, name, ts) =>
-        app.client.reactions
-          .add({ channel: ch, name, timestamp: ts })
-          .then(() => {}),
+      addReaction,
       channelId,
     });
 
     // Start IPC server for multi-session relay
-    const { IPCServer: IPCServerClass } = await import('./src/ipc.ts');
-    const server = new IPCServerClass({
+    const server = new IPCServer({
       socketPath: SOCKET_PATH,
       poster: postThreaded,
       messageUpdater: (channel, ts, text, blocks) =>
         app.client.chat.update({ channel, ts, text, blocks }).then(() => {}),
-      reacter: (channel, emoji, ts) =>
-        app.client.reactions
-          .add({ channel, name: emoji, timestamp: ts })
-          .then(() => {}),
+      reacter: addReaction,
       channelId,
     });
     await server.start();
@@ -159,17 +178,8 @@ async function activate(): Promise<void> {
     log(`channel activated — ${channelId}`);
   } catch (err) {
     log(`activation failed: ${err}`);
-    if (ipcServer) {
-      try {
-        await ipcServer.close();
-      } catch {}
-      ipcServer = null;
-      setActiveServer(null);
-    }
-    if (watchdogInterval) {
-      clearInterval(watchdogInterval);
-      watchdogInterval = null;
-    }
+    await teardownIpc();
+    clearWatchdog();
     releaseLock();
     await stopSlack();
     throw err;
@@ -187,17 +197,8 @@ setDeactivate(async () => {
   try {
     await postThreaded({ text: 'Session disconnected.' });
   } catch {}
-  if (ipcServer) {
-    try {
-      await ipcServer.close();
-    } catch {}
-    ipcServer = null;
-    setActiveServer(null);
-  }
-  if (watchdogInterval) {
-    clearInterval(watchdogInterval);
-    watchdogInterval = null;
-  }
+  await teardownIpc();
+  clearWatchdog();
   saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
   releaseLock();
   await stopSlack();
@@ -227,19 +228,10 @@ export function shutdownGracefully(reason?: string): void {
   // Best-effort IPC server teardown — fire-and-forget close (broadcasts
   // shutdown, closes sockets, unlinks socket file). Don't await or let it
   // block the synchronous shutdown path.
-  if (ipcServer) {
-    try {
-      ipcServer.close().catch(() => {});
-    } catch {}
-    ipcServer = null;
-    setActiveServer(null);
-  }
+  teardownIpc().catch(() => {});
 
   // Clear the watchdog interval so it stops firing during/after shutdown.
-  if (watchdogInterval) {
-    clearInterval(watchdogInterval);
-    watchdogInterval = null;
-  }
+  clearWatchdog();
 
   // Safety net: if stopSlack() hangs, force-exit after 3 s.
   // .unref() prevents this timer from keeping the event loop alive on its own.

@@ -157,7 +157,7 @@ Always call connect. The response tells you which mode you're in.
 `.trim();
 
 export const mcp = new Server(
-  { name: 'slack-channel', version: '0.8.1' },
+  { name: 'slack-channel', version: '0.9.0' },
   {
     capabilities: {
       experimental: {

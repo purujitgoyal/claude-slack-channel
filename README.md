@@ -119,6 +119,14 @@ If another session already holds the lock, `connect` fails with a clear error me
 6. When Claude needs tool approval, you'll see Allow/Deny buttons in the thread
 7. If you reply in an old thread, a new thread is started with a summary of the old thread's history
 
+## Multi-session
+
+- A second session calling `connect` automatically enters **client mode** — it does not steal the channel from the primary session
+- The client session gets its own Slack thread for messages and permission buttons, independent of the primary thread
+- Both sessions can receive messages and relay permissions simultaneously
+- `disconnect` in either mode returns that session to dormant — the other session is unaffected
+- To recover after degradation or a flap, call `connect` again in the affected session
+
 ### Thread lifecycle
 
 - **New session** → always starts a fresh thread (including `--resume` / `/resume`)

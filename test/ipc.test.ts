@@ -758,10 +758,10 @@ describe('IPCClient', () => {
     const threadTs = await client.newThread('starting fresh');
     expect(threadTs).toBe('new-thread-ts');
 
-    // Poster was called with the new thread text (no thread_ts — new top-level msg)
+    // Poster was called with thread_ts: '' (explicitly top-level)
     const newThreadCall = posterMock.mock.calls[1][0];
     expect(newThreadCall.text).toBe('starting fresh');
-    expect(newThreadCall.thread_ts).toBeUndefined();
+    expect(newThreadCall.thread_ts).toBe('');
 
     client.close();
   });
@@ -1618,10 +1618,10 @@ describe('Multi-session IPC integration', () => {
     // Server map should reflect the new threadTs
     expect(server.clients.get('e2e-sess-1')!.threadTs).toBe('new-ts');
 
-    // Poster was called without thread_ts (top-level message)
+    // Poster was called with thread_ts: '' (explicitly top-level)
     const newThreadCall = posterMock.mock.calls[1][0];
     expect(newThreadCall.text).toBe('status update');
-    expect(newThreadCall.thread_ts).toBeUndefined();
+    expect(newThreadCall.thread_ts).toBe('');
 
     client.close();
   });

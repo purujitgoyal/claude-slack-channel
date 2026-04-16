@@ -435,6 +435,7 @@ export class IPCServer {
     try {
       const threadTs = await this.opts.poster({
         text: `\u{1F4E1} Session connected: ${label}`,
+        thread_ts: '',
       });
 
       if (!threadTs) {
@@ -501,6 +502,7 @@ export class IPCServer {
       // Create a new thread header for this client
       const threadTs = await this.opts.poster({
         text: msg.text ?? `📡 Session continued: ${client.label}`,
+        thread_ts: '',
       });
 
       if (!threadTs) {

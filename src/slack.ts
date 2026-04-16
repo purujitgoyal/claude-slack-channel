@@ -45,8 +45,16 @@ export async function postThreaded(opts: {
   blocks?: any[];
   thread_ts?: string;
 }): Promise<string | undefined> {
-  // If an explicit thread_ts is provided (e.g. posting on behalf of an IPC
-  // client), use it directly — skip the active-thread state machine entirely.
+  // Empty string = explicitly top-level (used by IPC server to create client
+  // thread headers). Non-empty = post in that thread. Omitted = use active thread.
+  if (opts.thread_ts === '') {
+    const result = await bolt!.client.chat.postMessage({
+      channel: channelId,
+      text: opts.text,
+      blocks: opts.blocks,
+    });
+    return result.ts;
+  }
   if (opts.thread_ts) {
     const result = await bolt!.client.chat.postMessage({
       channel: channelId,

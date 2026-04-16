@@ -676,28 +676,30 @@ describe('IPCClient', () => {
     client.close();
   });
 
-  test('onDisconnect callback fires on server close', async () => {
+  test('onDisconnect fires with graceful: true on server close (shutdown sent)', async () => {
     await server.start();
     posterMock.mockResolvedValueOnce('ts-1');
 
-    const disconnected = new Promise<boolean>((resolve) => {
+    const disconnected = new Promise<{ graceful: boolean }>((resolve) => {
       const client = new IPCClient({
         socketPath: sockPath,
         sessionId: 'sess-1',
         label: 'test',
-        onDisconnect: () => resolve(true),
+        onDisconnect: (info) => resolve(info),
       });
       client.connect();
     });
 
     await delay(100);
+    // server.close() broadcasts shutdown before closing sockets
     await server.close();
 
     const got = await Promise.race([
       disconnected,
-      delay(2000).then(() => false),
+      delay(2000).then(() => null),
     ]);
-    expect(got).toBe(true);
+    expect(got).not.toBeNull();
+    expect(got!.graceful).toBe(true);
   });
 
   test('send writes a message to the server', async () => {
@@ -886,6 +888,247 @@ describe('IPCClient', () => {
     client.close();
 
     await expect(sendPromise).rejects.toThrow();
+  });
+
+  test('onDisconnect fires with graceful: false on unexpected EOF (no shutdown)', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1');
+
+    const disconnectInfo = new Promise<{ graceful: boolean }>((resolve) => {
+      const client = new IPCClient({
+        socketPath: sockPath,
+        sessionId: 'sess-1',
+        label: 'test',
+        onDisconnect: (info) => resolve(info),
+      });
+      client.connect();
+    });
+
+    await delay(100);
+
+    // Forcefully terminate the server socket without sending shutdown
+    for (const entry of server.clients.values()) {
+      entry.socket.end();
+    }
+
+    const got = await Promise.race([
+      disconnectInfo,
+      delay(2000).then(() => null),
+    ]);
+    expect(got).not.toBeNull();
+    expect(got!.graceful).toBe(false);
+  });
+
+  test('client receives shutdown message → onDisconnect fires with graceful: true', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1');
+
+    const disconnectInfo = new Promise<{ graceful: boolean }>((resolve) => {
+      const client = new IPCClient({
+        socketPath: sockPath,
+        sessionId: 'sess-1',
+        label: 'test',
+        onDisconnect: (info) => resolve(info),
+      });
+      client.connect();
+    });
+
+    await delay(100);
+
+    // Server broadcasts shutdown then closes (mimics normal shutdown)
+    await server.close();
+
+    const got = await Promise.race([
+      disconnectInfo,
+      delay(2000).then(() => null),
+    ]);
+    expect(got).not.toBeNull();
+    expect(got!.graceful).toBe(true);
+  });
+
+  test('intentional close() does NOT trigger onDisconnect', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1');
+
+    let disconnectCalled = false;
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+      onDisconnect: () => {
+        disconnectCalled = true;
+      },
+    });
+    await client.connect();
+
+    // Intentional close — should NOT fire onDisconnect
+    client.close();
+    await delay(200);
+
+    expect(disconnectCalled).toBe(false);
+  });
+
+  test('intentional close() sends unregister message to server', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1');
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+    expect(server.clients.size).toBe(1);
+
+    client.close();
+    await delay(100);
+
+    // Server should have removed client from map (handleClose triggered)
+    expect(server.clients.size).toBe(0);
+  });
+});
+
+// ── Client-to-dormant degradation (server-side) ──────────────────────────
+
+describe('IPCServer client disconnect cleanup', () => {
+  let server: IPCServer;
+  let sockPath: string;
+  let posterMock: ReturnType<typeof mock>;
+  let messageUpdaterMock: ReturnType<typeof mock>;
+  let reacterMock: ReturnType<typeof mock>;
+
+  beforeEach(() => {
+    sockPath = tmpSock();
+    posterMock = mock(async () => `thread-ts-${randomUUID()}`);
+    messageUpdaterMock = mock(async () => {});
+    reacterMock = mock(async () => {});
+    server = new IPCServer({
+      socketPath: sockPath,
+      poster: posterMock as any,
+      messageUpdater: messageUpdaterMock as any,
+      reacter: reacterMock as any,
+      channelId: 'C-test',
+    });
+  });
+
+  afterEach(async () => {
+    try {
+      await server.close();
+    } catch {
+      // already closed
+    }
+    try {
+      if (existsSync(sockPath)) unlinkSync(sockPath);
+    } catch {
+      // ignore
+    }
+  });
+
+  test('client disconnect removes permRouting entries for that session', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1');
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+
+    // Manually add permRouting entries for sess-1
+    server.permRouting.set('req-a', {
+      sessionId: 'sess-1',
+      slackTs: 'slack-ts-a',
+      timestamp: Date.now(),
+      toolName: 'Bash',
+      description: 'Run something',
+      inputPreview: 'ls',
+    });
+    server.permRouting.set('req-b', {
+      sessionId: 'sess-1',
+      slackTs: 'slack-ts-b',
+      timestamp: Date.now(),
+      toolName: 'Edit',
+      description: 'Edit file',
+      inputPreview: 'foo.ts',
+    });
+    // Entry for a different session — should survive
+    server.permRouting.set('req-c', {
+      sessionId: 'sess-other',
+      slackTs: 'slack-ts-c',
+      timestamp: Date.now(),
+      toolName: 'Read',
+      description: 'Read file',
+      inputPreview: 'bar.ts',
+    });
+
+    expect(server.permRouting.size).toBe(3);
+
+    client.close();
+    await delay(200);
+
+    // Only sess-other's entry should remain
+    expect(server.permRouting.size).toBe(1);
+    expect(server.permRouting.has('req-c')).toBe(true);
+    expect(server.permRouting.has('req-a')).toBe(false);
+    expect(server.permRouting.has('req-b')).toBe(false);
+  });
+
+  test('client disconnect posts "session disconnected" in client thread', async () => {
+    await server.start();
+    const threadTs = 'client-thread-ts';
+    posterMock.mockResolvedValueOnce(threadTs);
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+
+    client.close();
+    await delay(200);
+
+    // The poster should have been called for register + disconnect message
+    const calls = posterMock.mock.calls;
+    const disconnectCall = calls.find(
+      (c: any) =>
+        c[0]?.text?.includes('disconnected') && c[0]?.thread_ts === threadTs,
+    );
+    expect(disconnectCall).toBeDefined();
+  });
+
+  test('client disconnect updates pending perm messages with "session disconnected"', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1');
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+
+    // Add a permRouting entry with a Slack message ts
+    server.permRouting.set('req-perm', {
+      sessionId: 'sess-1',
+      slackTs: 'perm-slack-ts',
+      timestamp: Date.now(),
+      toolName: 'Bash',
+      description: 'Run command',
+      inputPreview: 'npm test',
+    });
+
+    client.close();
+    await delay(200);
+
+    // messageUpdater should have been called to update the perm message
+    expect(messageUpdaterMock).toHaveBeenCalled();
+    const [channel, ts, text, blocks] = messageUpdaterMock.mock.calls[0];
+    expect(channel).toBe('C-test');
+    expect(ts).toBe('perm-slack-ts');
+    expect(text).toContain('disconnected');
+    expect(blocks).toEqual([]);
   });
 });
 

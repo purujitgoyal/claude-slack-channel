@@ -611,8 +611,42 @@ export class IPCServer {
   /** Handle client socket close: remove from connection map */
   private handleClose(socket: BunSocket<SocketContext>): void {
     const sessionId = socket.data?.sessionId;
-    if (sessionId) {
-      this.clients.delete(sessionId);
+    if (!sessionId) return;
+
+    const client = this.clients.get(sessionId);
+    this.clients.delete(sessionId);
+
+    // Remove any permRouting entries for this session
+    const toRemove: string[] = [];
+    for (const [reqId, entry] of this.permRouting) {
+      if (entry.sessionId === sessionId) {
+        toRemove.push(reqId);
+      }
+    }
+    for (const reqId of toRemove) {
+      const entry = this.permRouting.get(reqId)!;
+      this.permRouting.delete(reqId);
+      // Update pending Slack perm messages (best-effort)
+      if (entry.slackTs) {
+        this.opts
+          .messageUpdater(
+            this.opts.channelId,
+            entry.slackTs,
+            `\u26a0\ufe0f Session disconnected — \`${entry.toolName}\` permission request is no longer valid.`,
+            [],
+          )
+          .catch(() => {});
+      }
+    }
+
+    // Post "session disconnected" in the client's thread (best-effort)
+    if (client?.threadTs) {
+      this.opts
+        .poster({
+          text: '\u26a0\ufe0f Session disconnected.',
+          thread_ts: client.threadTs,
+        })
+        .catch(() => {});
     }
   }
 
@@ -742,7 +776,7 @@ export interface IPCClientOptions {
   label: string;
   onMessage?: (msg: ServerMessage) => void;
   onPermResponse?: (requestId: string, behavior: string) => void;
-  onDisconnect?: () => void;
+  onDisconnect?: (info: { graceful: boolean }) => void;
   connectTimeoutMs?: number;
 }
 
@@ -764,6 +798,8 @@ export class IPCClient {
     string,
     { resolve: (msg: ServerMessage) => void; reject: (err: Error) => void }
   >();
+  private receivedShutdown = false;
+  private intentionalClose = false;
 
   constructor(opts: IPCClientOptions) {
     this.opts = opts;
@@ -822,6 +858,11 @@ export class IPCClient {
                 continue;
               }
 
+              // Track shutdown message for graceful detection
+              if (msg.type === 'shutdown') {
+                this.receivedShutdown = true;
+              }
+
               // Dispatch perm_response to dedicated callback
               if (msg.type === 'perm_response') {
                 const pr = msg as PermResponseMessage;
@@ -844,7 +885,12 @@ export class IPCClient {
             }
             this.pending.clear();
             settle(() => reject(new Error('IPC connection closed before ack')));
-            this.opts.onDisconnect?.();
+            // Only fire onDisconnect for unexpected disconnects, not intentional close()
+            if (!this.intentionalClose) {
+              this.opts.onDisconnect?.({
+                graceful: this.receivedShutdown,
+              });
+            }
           },
           error: (_socket, err) => {
             settle(() => reject(err));
@@ -962,9 +1008,17 @@ export class IPCClient {
     });
   }
 
-  /** Close the client connection */
+  /** Close the client connection (intentional — does not trigger onDisconnect) */
   close(): void {
+    this.intentionalClose = true;
     if (this.socket) {
+      // Send unregister before closing so the server knows it's intentional
+      try {
+        const unregMsg: UnregisterMessage = { type: 'unregister' };
+        this.socket.write(encode(unregMsg));
+      } catch {
+        // Socket may already be in a bad state
+      }
       this.socket.end();
       this.socket = null;
     }

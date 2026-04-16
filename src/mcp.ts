@@ -266,10 +266,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
                 params: { request_id: requestId, behavior },
               });
             },
-            onDisconnect: () => {
-              log('IPC client disconnected — degrading to dormant');
+            onDisconnect: ({ graceful }) => {
               ipcClient = null;
               setMode('dormant');
+              log(
+                graceful
+                  ? 'Connected session disconnected — degraded to dormant'
+                  : 'IPC connection lost unexpectedly — degraded to dormant',
+              );
             },
           });
           await client.connect();

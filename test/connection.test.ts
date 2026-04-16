@@ -95,7 +95,7 @@ mock.module('@slack/bolt', () => {
 
 let ipcConnectBehavior: 'success' | 'fail' = 'fail';
 const ipcClientCloseMock = mock(() => {});
-let ipcOnDisconnect: (() => void) | undefined;
+let ipcOnDisconnect: ((info: { graceful: boolean }) => void) | undefined;
 
 mock.module('../src/ipc', () => {
   return {
@@ -1139,8 +1139,8 @@ describe('connect tool', () => {
       });
       expect(getMode()).toBe('client');
 
-      // Simulate server disconnect
-      ipcOnDisconnect?.();
+      // Simulate server disconnect (graceful)
+      ipcOnDisconnect?.({ graceful: true });
       expect(getMode()).toBe('dormant');
 
       // Clean up

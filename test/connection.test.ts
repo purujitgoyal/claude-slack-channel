@@ -24,10 +24,20 @@ import {
 
 const releaseLockMock = mock(() => {});
 const acquireLockMock = mock(() => {});
+const tryAcquireLockMock = mock(() => true);
+
+class MockLockHeldError extends Error {
+  constructor(message?: string) {
+    super(message ?? 'Lock is held by another instance');
+    this.name = 'LockHeldError';
+  }
+}
 
 mock.module('../src/lock', () => ({
   acquireLock: acquireLockMock,
   releaseLock: releaseLockMock,
+  tryAcquireLock: tryAcquireLockMock,
+  LockHeldError: MockLockHeldError,
 }));
 
 // ---------------------------------------------------------------------------
@@ -93,7 +103,8 @@ const {
   setGetPpid,
   resetWatchdog,
 } = await import('../server');
-const { mcp, setMode } = await import('../src/mcp');
+const { mcp, setMode, getMode, setActivate } = await import('../src/mcp');
+const { LockHeldError } = await import('../src/lock');
 const { setLastSeenEventTs } = await import('../src/session');
 
 // ---------------------------------------------------------------------------
@@ -935,11 +946,45 @@ describe('watchdog', () => {
 });
 
 // ---------------------------------------------------------------------------
+// tryAcquireLock — non-throwing lock acquisition
+// ---------------------------------------------------------------------------
+
+describe('tryAcquireLock', () => {
+  beforeEach(() => {
+    tryAcquireLockMock.mockReset();
+    tryAcquireLockMock.mockReturnValue(true);
+    releaseLockMock.mockClear();
+  });
+
+  test('returns true when lock is free', () => {
+    tryAcquireLockMock.mockReturnValue(true);
+    const result = tryAcquireLockMock();
+    expect(result).toBe(true);
+  });
+
+  test('returns false when lock is held', () => {
+    // First call succeeds
+    tryAcquireLockMock.mockReturnValueOnce(true);
+    expect(tryAcquireLockMock()).toBe(true);
+
+    // Second call fails (lock is held)
+    tryAcquireLockMock.mockReturnValueOnce(false);
+    expect(tryAcquireLockMock()).toBe(false);
+  });
+
+  test('releaseLock is safe to call when no lock is held', () => {
+    // releaseLock should not throw even when nothing is locked
+    expect(() => releaseLockMock()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Connect tool — tool list changes based on activation state
 // ---------------------------------------------------------------------------
 
 describe('connect tool', () => {
   const listTools = (mcp as any)._requestHandlers?.get('tools/list');
+  const callTool = (mcp as any)._requestHandlers?.get('tools/call');
 
   test('always lists all tools including connect', async () => {
     setMode('dormant');
@@ -949,5 +994,76 @@ describe('connect tool', () => {
     expect(names).toContain('reply');
     expect(names).toContain('new_thread');
     expect(names).toContain('react');
+  });
+
+  // =========================================================================
+  // Connect handler — mode branching
+  // =========================================================================
+
+  describe('connect handler mode branching', () => {
+    afterEach(() => {
+      setMode('dormant');
+    });
+
+    test('returns "Already connected." when mode is connected', async () => {
+      setMode('connected');
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(result.content[0].text).toBe('Already connected.');
+    });
+
+    test('returns "Already connected as client." when mode is client', async () => {
+      setMode('client');
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(result.content[0].text).toBe('Already connected as client.');
+    });
+
+    test('calls activate and returns "Connected to Slack." on success', async () => {
+      setMode('dormant');
+      const activateMock = mock(async () => {});
+      setActivate(activateMock);
+
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(activateMock).toHaveBeenCalledTimes(1);
+      expect(result.content[0].text).toBe('Connected to Slack.');
+    });
+
+    test('catches LockHeldError, sets client mode, returns client message', async () => {
+      setMode('dormant');
+      setActivate(async () => {
+        throw new LockHeldError();
+      });
+
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(getMode()).toBe('client');
+      expect(result.content[0].text).toBe(
+        'Connected as client \u2014 messages and permissions relay through the active session.',
+      );
+    });
+
+    test('re-throws non-LockHeldError errors', async () => {
+      setMode('dormant');
+      setActivate(async () => {
+        throw new Error('SLACK_BOT_TOKEN not set');
+      });
+
+      await expect(
+        callTool({
+          method: 'tools/call',
+          params: { name: 'connect', arguments: {} },
+        }),
+      ).rejects.toThrow('SLACK_BOT_TOKEN not set');
+    });
   });
 });

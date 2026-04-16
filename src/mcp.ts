@@ -10,6 +10,7 @@ import {
   log,
   textResult,
 } from './config.ts';
+import { LockHeldError } from './lock.ts';
 import {
   pendingPermissions,
   saveSession,
@@ -227,10 +228,22 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'connect') {
-    if (getMode() !== 'dormant') return textResult('Already connected.');
+    if (getMode() === 'connected') return textResult('Already connected.');
+    if (getMode() === 'client')
+      return textResult('Already connected as client.');
     if (!injectedActivate) throw new Error('activate function not set');
-    await injectedActivate();
-    return textResult('Connected to Slack.');
+    try {
+      await injectedActivate();
+      return textResult('Connected to Slack.');
+    } catch (err) {
+      if (err instanceof LockHeldError) {
+        setMode('client');
+        return textResult(
+          'Connected as client \u2014 messages and permissions relay through the active session.',
+        );
+      }
+      throw err;
+    }
   }
 
   if (req.params.name === 'disconnect') {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ENV_PATH, loadEnv, log } from './src/config.ts';
-import { acquireLock, releaseLock } from './src/lock.ts';
+import { LockHeldError, releaseLock, tryAcquireLock } from './src/lock.ts';
 import {
   isConnected,
   mcp,
@@ -57,7 +57,7 @@ export function resetWatchdog(): void {
 let watchdogInterval: ReturnType<typeof setInterval> | null = null;
 
 /**
- * Start the parent-PID watchdog. Called inside activate() after acquireLock().
+ * Start the parent-PID watchdog. Called inside activate() after tryAcquireLock().
  * On macOS/Linux, when a parent process dies the OS reparents the child to
  * pid 1 (init/launchd). We use ppid === 1 as the orphan signal.
  */
@@ -104,7 +104,9 @@ async function activate(): Promise<void> {
     );
   }
 
-  acquireLock();
+  if (!tryAcquireLock()) {
+    throw new LockHeldError();
+  }
   startWatchdog();
 
   try {

@@ -53,6 +53,44 @@ export function codePreviewBlock(preview: string): KnownBlock[] {
   ];
 }
 
+export function buildPermissionBlocks(
+  requestId: string,
+  toolName: string,
+  description: string,
+  preview: string,
+): any[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Claude wants to use \`${toolName}\`*\n${description}`,
+      },
+    },
+    ...codePreviewBlock(preview),
+    {
+      type: 'actions',
+      block_id: `permission_${requestId}`,
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Allow' },
+          style: 'primary',
+          action_id: `allow_${requestId}`,
+          value: `allow:${requestId}`,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Deny' },
+          style: 'danger',
+          action_id: `deny_${requestId}`,
+          value: `deny:${requestId}`,
+        },
+      ],
+    },
+  ];
+}
+
 export function formatInputPreview(toolName: string, raw: string): string {
   try {
     const obj = JSON.parse(raw);

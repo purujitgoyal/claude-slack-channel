@@ -5,7 +5,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import {
-  codePreviewBlock,
+  buildPermissionBlocks,
   formatInputPreview,
   getSessionLabel,
   log,
@@ -260,6 +260,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             socketPath: SOCKET_PATH,
             sessionId: crypto.randomUUID(),
             label: getSessionLabel(),
+            onPermResponse: (requestId, behavior) => {
+              mcp.notification({
+                method: 'notifications/claude/channel/permission',
+                params: { request_id: requestId, behavior },
+              });
+            },
             onDisconnect: () => {
               log('IPC client disconnected — degrading to dormant');
               ipcClient = null;
@@ -384,42 +390,30 @@ const PermissionRequestSchema = z.object({
 });
 
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
-  const b = requireBridge();
   const { request_id, tool_name, description, input_preview } = params;
+
+  // ── Dormant mode: silently ignore — CC falls back to terminal ──
+  if (getMode() === 'dormant') return;
+
+  // ── Client mode: forward over IPC to the connected session ──
+  if (getMode() === 'client') {
+    if (!ipcClient) return; // relay lost — CC falls back to terminal
+    ipcClient.sendPermRequest(
+      request_id,
+      tool_name,
+      description,
+      input_preview,
+    );
+    return;
+  }
+
+  // ── Connected mode: post buttons to Slack directly ──
+  const b = requireBridge();
   const preview = formatInputPreview(tool_name, input_preview);
 
   await b.postThreaded({
     text: `Claude wants to use \`${tool_name}\` — tap Allow or Deny`,
-    blocks: [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*Claude wants to use \`${tool_name}\`*\n${description}`,
-        },
-      },
-      ...codePreviewBlock(preview),
-      {
-        type: 'actions',
-        block_id: `permission_${request_id}`,
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Allow' },
-            style: 'primary',
-            action_id: `allow_${request_id}`,
-            value: `allow:${request_id}`,
-          },
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Deny' },
-            style: 'danger',
-            action_id: `deny_${request_id}`,
-            value: `deny:${request_id}`,
-          },
-        ],
-      },
-    ],
+    blocks: buildPermissionBlocks(request_id, tool_name, description, preview),
   });
   pendingPermissions.set(request_id, {
     tool_name,

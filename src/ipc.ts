@@ -16,7 +16,7 @@
 import { existsSync, unlinkSync } from 'node:fs';
 import type { Socket as BunSocket } from 'bun';
 import { z } from 'zod';
-import { log } from './config.ts';
+import { buildPermissionBlocks, formatInputPreview, log } from './config.ts';
 
 // ── Client → Connected (server) schemas ────────────────────────────
 
@@ -264,12 +264,23 @@ interface SocketContext {
   sessionId?: string;
 }
 
+/** Entry in the permission routing map — tracks pending perm requests from clients */
+export interface PermRouteEntry {
+  sessionId: string;
+  slackTs: string;
+  timestamp: number;
+  toolName: string;
+  description: string;
+  inputPreview: string;
+}
+
 /**
  * IPC Server — binds to a Unix domain socket, accepts client connections,
  * handles registration, and maintains a connection map.
  */
 export class IPCServer {
   readonly clients: Map<string, ClientEntry> = new Map();
+  readonly permRouting: Map<string, PermRouteEntry> = new Map();
   private listener: ReturnType<typeof Bun.listen> | null = null;
   private readonly opts: IPCServerOptions;
 
@@ -329,6 +340,10 @@ export class IPCServer {
       } else if (msg.type === 'react') {
         this.handleReact(socket, msg as ReactMessage).catch((err) =>
           log(`react handler error: ${err}`),
+        );
+      } else if (msg.type === 'perm_request') {
+        this.handlePermRequest(socket, msg as PermRequestMessage).catch((err) =>
+          log(`perm_request handler error: ${err}`),
         );
       }
     }
@@ -503,6 +518,52 @@ export class IPCServer {
     }
   }
 
+  /** Handle a perm_request from a client: post buttons to client's thread, store in routing map */
+  private async handlePermRequest(
+    socket: BunSocket<SocketContext>,
+    msg: PermRequestMessage,
+  ): Promise<void> {
+    const sessionId = socket.data.sessionId;
+    const client = sessionId ? this.clients.get(sessionId) : undefined;
+
+    if (!client || !sessionId) {
+      log('perm_request from unregistered client — ignoring');
+      return;
+    }
+
+    const { requestId, toolName, description, inputPreview } = msg;
+    const preview = formatInputPreview(toolName, inputPreview);
+
+    try {
+      const slackTs = await this.opts.poster({
+        text: `Claude wants to use \`${toolName}\` — tap Allow or Deny`,
+        blocks: buildPermissionBlocks(
+          requestId,
+          toolName,
+          description,
+          preview,
+        ),
+        thread_ts: client.threadTs,
+      });
+
+      // Store in routing map for verdict routing (Task 8)
+      this.permRouting.set(requestId, {
+        sessionId,
+        slackTs: slackTs ?? '',
+        timestamp: Date.now(),
+        toolName,
+        description,
+        inputPreview: preview,
+      });
+
+      log(
+        `perm_request ${requestId} (${toolName}) posted to client ${sessionId}'s thread`,
+      );
+    } catch (err) {
+      log(`perm_request ${requestId} failed: ${err}`);
+    }
+  }
+
   /** Handle client socket close: remove from connection map */
   private handleClose(socket: BunSocket<SocketContext>): void {
     const sessionId = socket.data?.sessionId;
@@ -552,6 +613,7 @@ export class IPCServer {
       }
     }
     this.clients.clear();
+    this.permRouting.clear();
 
     if (this.listener) {
       this.listener.stop();
@@ -578,6 +640,7 @@ export interface IPCClientOptions {
   sessionId: string;
   label: string;
   onMessage?: (msg: ServerMessage) => void;
+  onPermResponse?: (requestId: string, behavior: string) => void;
   onDisconnect?: () => void;
   connectTimeoutMs?: number;
 }
@@ -658,6 +721,12 @@ export class IPCClient {
                 continue;
               }
 
+              // Dispatch perm_response to dedicated callback
+              if (msg.type === 'perm_response') {
+                const pr = msg as PermResponseMessage;
+                this.opts.onPermResponse?.(pr.requestId, pr.behavior);
+              }
+
               // Dispatch to onMessage callback
               this.opts.onMessage?.(msg as ServerMessage);
 
@@ -735,6 +804,25 @@ export class IPCClient {
       requestId,
       emoji,
       eventTs,
+    });
+  }
+
+  /**
+   * Send a permission request to the server. Fire-and-forget — no ack expected.
+   * The response comes later as `perm_response` via the `onPermResponse` callback.
+   */
+  sendPermRequest(
+    requestId: string,
+    toolName: string,
+    description: string,
+    inputPreview: string,
+  ): void {
+    this.send({
+      type: 'perm_request',
+      requestId,
+      toolName,
+      description,
+      inputPreview,
     });
   }
 

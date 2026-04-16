@@ -316,7 +316,7 @@ export class IPCServer {
         },
         error: (_socket, err) => {
           // Log but don't crash
-          console.error('[IPCServer] socket error:', err);
+          log(`[IPCServer] socket error: ${err}`);
         },
       },
     });
@@ -393,6 +393,34 @@ export class IPCServer {
     }
   }
 
+  /** Write an error message to the socket. */
+  private sendError(
+    socket: BunSocket<SocketContext>,
+    message: string,
+    requestId?: string,
+  ): void {
+    const errMsg: ErrorMessage = { type: 'error', message, requestId };
+    socket.write(encode(errMsg));
+  }
+
+  /**
+   * Look up the registered client for this socket.
+   * Returns `{ sessionId, client }` if found, otherwise writes an error to the
+   * socket and returns `null`.
+   */
+  private requireClient(
+    socket: BunSocket<SocketContext>,
+    requestId: string,
+  ): { sessionId: string; client: ClientEntry } | null {
+    const sessionId = socket.data.sessionId;
+    const client = sessionId ? this.clients.get(sessionId) : undefined;
+    if (!client || !sessionId) {
+      this.sendError(socket, 'Not registered', requestId);
+      return null;
+    }
+    return { sessionId, client };
+  }
+
   /** Handle a register message: create thread header, store client, send ack */
   private async handleRegister(
     socket: BunSocket<SocketContext>,
@@ -406,11 +434,10 @@ export class IPCServer {
       });
 
       if (!threadTs) {
-        const errMsg: ErrorMessage = {
-          type: 'error',
-          message: 'Failed to create thread header — poster returned no ts',
-        };
-        socket.write(encode(errMsg));
+        this.sendError(
+          socket,
+          'Failed to create thread header — poster returned no ts',
+        );
         return;
       }
 
@@ -427,11 +454,7 @@ export class IPCServer {
       };
       socket.write(encode(ack));
     } catch (err) {
-      const errMsg: ErrorMessage = {
-        type: 'error',
-        message: `Register failed: ${err}`,
-      };
-      socket.write(encode(errMsg));
+      this.sendError(socket, `Register failed: ${err}`);
     }
   }
 
@@ -440,18 +463,9 @@ export class IPCServer {
     socket: BunSocket<SocketContext>,
     msg: SendMessageMessage,
   ): Promise<void> {
-    const sessionId = socket.data.sessionId;
-    const client = sessionId ? this.clients.get(sessionId) : undefined;
-
-    if (!client) {
-      const errMsg: ErrorMessage = {
-        type: 'error',
-        requestId: msg.requestId,
-        message: 'Not registered',
-      };
-      socket.write(encode(errMsg));
-      return;
-    }
+    const entry = this.requireClient(socket, msg.requestId);
+    if (!entry) return;
+    const { client } = entry;
 
     try {
       const ts = await this.opts.poster({
@@ -466,12 +480,7 @@ export class IPCServer {
       };
       socket.write(encode(ack));
     } catch (err) {
-      const errMsg: ErrorMessage = {
-        type: 'error',
-        requestId: msg.requestId,
-        message: `send_message failed: ${err}`,
-      };
-      socket.write(encode(errMsg));
+      this.sendError(socket, `send_message failed: ${err}`, msg.requestId);
     }
   }
 
@@ -480,18 +489,9 @@ export class IPCServer {
     socket: BunSocket<SocketContext>,
     msg: NewThreadMessage,
   ): Promise<void> {
-    const sessionId = socket.data.sessionId;
-    const client = sessionId ? this.clients.get(sessionId) : undefined;
-
-    if (!client) {
-      const errMsg: ErrorMessage = {
-        type: 'error',
-        requestId: msg.requestId,
-        message: 'Not registered',
-      };
-      socket.write(encode(errMsg));
-      return;
-    }
+    const entry = this.requireClient(socket, msg.requestId);
+    if (!entry) return;
+    const { client } = entry;
 
     try {
       // Create a new thread header for this client
@@ -500,12 +500,11 @@ export class IPCServer {
       });
 
       if (!threadTs) {
-        const errMsg: ErrorMessage = {
-          type: 'error',
-          requestId: msg.requestId,
-          message: 'Failed to create new thread — poster returned no ts',
-        };
-        socket.write(encode(errMsg));
+        this.sendError(
+          socket,
+          'Failed to create new thread — poster returned no ts',
+          msg.requestId,
+        );
         return;
       }
 
@@ -519,12 +518,7 @@ export class IPCServer {
       };
       socket.write(encode(ack));
     } catch (err) {
-      const errMsg: ErrorMessage = {
-        type: 'error',
-        requestId: msg.requestId,
-        message: `new_thread failed: ${err}`,
-      };
-      socket.write(encode(errMsg));
+      this.sendError(socket, `new_thread failed: ${err}`, msg.requestId);
     }
   }
 
@@ -533,16 +527,8 @@ export class IPCServer {
     socket: BunSocket<SocketContext>,
     msg: ReactMessage,
   ): Promise<void> {
-    const sessionId = socket.data.sessionId;
-    if (!sessionId || !this.clients.has(sessionId)) {
-      const errMsg: ErrorMessage = {
-        type: 'error',
-        requestId: msg.requestId,
-        message: 'Not registered',
-      };
-      socket.write(encode(errMsg));
-      return;
-    }
+    const entry = this.requireClient(socket, msg.requestId);
+    if (!entry) return;
 
     try {
       await this.opts.reacter(this.opts.channelId, msg.emoji, msg.eventTs);
@@ -553,12 +539,7 @@ export class IPCServer {
       };
       socket.write(encode(ack));
     } catch (err) {
-      const errMsg: ErrorMessage = {
-        type: 'error',
-        requestId: msg.requestId,
-        message: `react failed: ${err}`,
-      };
-      socket.write(encode(errMsg));
+      this.sendError(socket, `react failed: ${err}`, msg.requestId);
     }
   }
 

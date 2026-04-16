@@ -740,16 +740,22 @@ export function routeVerdict(
     requestId,
     behavior,
   };
-  activeServer.sendTo(entry.sessionId, resp);
+  const sent = activeServer.sendTo(entry.sessionId, resp);
 
-  // Extract details before removing
+  // Always remove the routing entry — it's stale whether the send succeeded or not
+  activeServer.permRouting.delete(requestId);
+
+  // If the send failed the client is gone; return routed:false so the caller
+  // falls through to the stale-button path and updates the Slack message.
+  if (!sent) return { routed: false };
+
+  // Extract details before returning
   const details = {
     toolName: entry.toolName,
     description: entry.description,
     inputPreview: entry.inputPreview,
   };
 
-  activeServer.permRouting.delete(requestId);
   return { routed: true, details };
 }
 

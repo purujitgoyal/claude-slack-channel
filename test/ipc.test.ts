@@ -1337,6 +1337,26 @@ describe('routeVerdict', () => {
     expect(server.permRouting.has('req-1')).toBe(false);
   });
 
+  test('returns { routed: false } and deletes entry when sendTo fails (disconnected client)', () => {
+    // Add a routing entry pointing to a session that has no connected socket
+    server.permRouting.set('req-disconnected', {
+      sessionId: 'sess-gone',
+      slackTs: '5000.0002',
+      timestamp: Date.now(),
+      toolName: 'Write',
+      description: 'Write a file',
+      inputPreview: 'hello.txt',
+    });
+
+    // sendTo returns false because 'sess-gone' has no entry in server.clients
+    const result = routeVerdict('req-disconnected', 'allow');
+
+    // Should return routed:false so caller falls through to stale-button path
+    expect(result.routed).toBe(false);
+    // Entry must still be cleaned up even though the send failed
+    expect(server.permRouting.has('req-disconnected')).toBe(false);
+  });
+
   test('returns { routed: false } for evicted (expired) entry', () => {
     // Entry was set then removed (simulating TTL eviction)
     server.permRouting.set('req-expired', {

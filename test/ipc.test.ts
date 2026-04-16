@@ -254,7 +254,7 @@ describe('IPCServer', () => {
   test('poster is called with thread header on register', async () => {
     await server.start();
 
-    posterMock.mockResolvedValueOnce('ts-1');
+    posterMock.mockResolvedValueOnce('ts-1').mockResolvedValueOnce('notif-ts');
 
     const client = new IPCClient({
       socketPath: sockPath,
@@ -263,7 +263,7 @@ describe('IPCServer', () => {
     });
     await client.connect();
 
-    expect(posterMock).toHaveBeenCalledTimes(1);
+    expect(posterMock).toHaveBeenCalledTimes(2);
     const call = posterMock.mock.calls[0][0];
     expect(call.text).toContain('my-label');
   });
@@ -271,7 +271,11 @@ describe('IPCServer', () => {
   test('multiple clients get separate entries in connection map', async () => {
     await server.start();
 
-    posterMock.mockResolvedValueOnce('ts-1').mockResolvedValueOnce('ts-2');
+    posterMock
+      .mockResolvedValueOnce('ts-1')
+      .mockResolvedValueOnce('notif-ts-1')
+      .mockResolvedValueOnce('ts-2')
+      .mockResolvedValueOnce('notif-ts-2');
 
     const c1 = new IPCClient({
       socketPath: sockPath,
@@ -447,6 +451,7 @@ describe('IPCServer', () => {
     await server.start();
     const clientThreadTs = '1234567890.000100';
     posterMock.mockResolvedValueOnce(clientThreadTs); // register
+    posterMock.mockResolvedValueOnce('notif-ts'); // client joined notification
     posterMock.mockResolvedValueOnce('msg-ts-1'); // send_message reply
 
     const client = new IPCClient({
@@ -476,8 +481,8 @@ describe('IPCServer', () => {
     expect(ack.ts).toBe('msg-ts-1');
 
     // Verify poster was called with the client's thread_ts
-    expect(posterMock).toHaveBeenCalledTimes(2);
-    const sendCall = posterMock.mock.calls[1][0];
+    expect(posterMock).toHaveBeenCalledTimes(3);
+    const sendCall = posterMock.mock.calls[2][0];
     expect(sendCall.text).toBe('hello from client');
     expect(sendCall.thread_ts).toBe(clientThreadTs);
 
@@ -488,6 +493,7 @@ describe('IPCServer', () => {
     await server.start();
     posterMock
       .mockResolvedValueOnce('old-thread-ts') // register
+      .mockResolvedValueOnce('notif-ts') // client joined notification
       .mockResolvedValueOnce('new-thread-ts'); // new_thread
 
     const ackReceived = new Promise<any>((resolve) => {
@@ -722,6 +728,7 @@ describe('IPCClient', () => {
   test('sendMessage resolves with ts from send_ack', async () => {
     await server.start();
     posterMock.mockResolvedValueOnce('ts-1'); // register
+    posterMock.mockResolvedValueOnce('notif-ts'); // client joined notification
     posterMock.mockResolvedValueOnce('msg-ts-1'); // send_message
 
     const client = new IPCClient({
@@ -735,7 +742,7 @@ describe('IPCClient', () => {
     expect(ts).toBe('msg-ts-1');
 
     // Poster was called with client's thread_ts
-    const sendCall = posterMock.mock.calls[1][0];
+    const sendCall = posterMock.mock.calls[2][0];
     expect(sendCall.text).toBe('hello');
     expect(sendCall.thread_ts).toBe('ts-1');
 
@@ -746,6 +753,7 @@ describe('IPCClient', () => {
     await server.start();
     posterMock
       .mockResolvedValueOnce('ts-1') // register
+      .mockResolvedValueOnce('notif-ts') // client joined notification
       .mockResolvedValueOnce('new-thread-ts'); // new_thread
 
     const client = new IPCClient({
@@ -759,7 +767,7 @@ describe('IPCClient', () => {
     expect(threadTs).toBe('new-thread-ts');
 
     // Poster was called with thread_ts: '' (explicitly top-level)
-    const newThreadCall = posterMock.mock.calls[1][0];
+    const newThreadCall = posterMock.mock.calls[2][0];
     expect(newThreadCall.text).toBe('starting fresh');
     expect(newThreadCall.thread_ts).toBe('');
 
@@ -770,6 +778,7 @@ describe('IPCClient', () => {
     await server.start();
     posterMock
       .mockResolvedValueOnce('ts-1') // register
+      .mockResolvedValueOnce('notif-ts') // client joined notification
       .mockResolvedValueOnce('new-thread-ts'); // new_thread
 
     const client = new IPCClient({
@@ -809,6 +818,7 @@ describe('IPCClient', () => {
     await server.start();
     posterMock
       .mockResolvedValueOnce('ts-1') // register
+      .mockResolvedValueOnce('notif-ts') // client joined notification
       .mockRejectedValueOnce(new Error('Slack API down')); // send_message
 
     const client = new IPCClient({
@@ -848,6 +858,7 @@ describe('IPCClient', () => {
     await server.start();
     posterMock
       .mockResolvedValueOnce('ts-1') // register
+      .mockResolvedValueOnce('notif-ts') // client joined notification
       .mockResolvedValueOnce('new-ts') // new_thread
       .mockResolvedValueOnce('msg-ts'); // send_message
 
@@ -862,7 +873,7 @@ describe('IPCClient', () => {
     await client.sendMessage('follow-up');
 
     // The send_message should post in the new thread
-    const sendCall = posterMock.mock.calls[2][0];
+    const sendCall = posterMock.mock.calls[3][0];
     expect(sendCall.thread_ts).toBe('new-ts');
 
     client.close();
@@ -1577,6 +1588,7 @@ describe('Multi-session IPC integration', () => {
     const clientThreadTs = '1700000000.000001';
     posterMock
       .mockResolvedValueOnce(clientThreadTs) // register
+      .mockResolvedValueOnce('notif-ts') // client joined notification
       .mockResolvedValueOnce('msg-ts-42'); // send_message
 
     const client = new IPCClient({
@@ -1590,8 +1602,8 @@ describe('Multi-session IPC integration', () => {
     expect(ts).toBe('msg-ts-42');
 
     // Verify poster was invoked with the correct thread_ts and text
-    expect(posterMock).toHaveBeenCalledTimes(2);
-    const sendCall = posterMock.mock.calls[1][0];
+    expect(posterMock).toHaveBeenCalledTimes(3);
+    const sendCall = posterMock.mock.calls[2][0];
     expect(sendCall.text).toBe('hello from e2e');
     expect(sendCall.thread_ts).toBe(clientThreadTs);
 
@@ -1602,6 +1614,7 @@ describe('Multi-session IPC integration', () => {
     await server.start();
     posterMock
       .mockResolvedValueOnce('old-ts') // register
+      .mockResolvedValueOnce('notif-ts') // client joined notification
       .mockResolvedValueOnce('new-ts'); // new_thread
 
     const client = new IPCClient({
@@ -1619,7 +1632,7 @@ describe('Multi-session IPC integration', () => {
     expect(server.clients.get('e2e-sess-1')!.threadTs).toBe('new-ts');
 
     // Poster was called with thread_ts: '' (explicitly top-level)
-    const newThreadCall = posterMock.mock.calls[1][0];
+    const newThreadCall = posterMock.mock.calls[2][0];
     expect(newThreadCall.text).toBe('status update');
     expect(newThreadCall.thread_ts).toBe('');
 
@@ -1630,6 +1643,7 @@ describe('Multi-session IPC integration', () => {
     await server.start();
     posterMock
       .mockResolvedValueOnce('thread-ts-1') // register
+      .mockResolvedValueOnce('notif-ts') // client joined notification
       .mockResolvedValueOnce('perm-slack-ts'); // perm_request poster
 
     const permResponseReceived = new Promise<{
@@ -1658,8 +1672,8 @@ describe('Multi-session IPC integration', () => {
     await delay(200);
 
     // Verify poster was called with Block Kit buttons in the client's thread
-    expect(posterMock).toHaveBeenCalledTimes(2);
-    const permCall = posterMock.mock.calls[1][0];
+    expect(posterMock).toHaveBeenCalledTimes(3);
+    const permCall = posterMock.mock.calls[2][0];
     expect(permCall.text).toContain('Bash');
     expect(permCall.thread_ts).toBe('thread-ts-1');
     expect(permCall.blocks).toBeDefined();

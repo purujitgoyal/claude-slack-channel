@@ -277,11 +277,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             onDisconnect: ({ graceful }) => {
               ipcClient = null;
               setMode('dormant');
-              log(
-                graceful
-                  ? 'Connected session disconnected — degraded to dormant'
-                  : 'IPC connection lost unexpectedly — degraded to dormant',
-              );
+              const reason = graceful
+                ? 'Connected session disconnected — degraded to dormant'
+                : 'IPC connection lost unexpectedly — degraded to dormant';
+              log(reason);
+              mcp
+                .notification({
+                  method: 'notifications/claude/channel',
+                  params: {
+                    content: `${reason}. Call connect to become the main session.`,
+                  },
+                })
+                .catch(() => {});
             },
           });
           await client.connect();
@@ -320,7 +327,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   if (getMode() === 'dormant')
-    throw new Error('slack channel is not active — call connect first');
+    throw new Error(
+      'Slack channel is not active — call connect first. If you were in client mode, the connected session may have disconnected.',
+    );
 
   // ── Client mode: forward tool calls over IPC ──
   if (getMode() === 'client') {
@@ -374,14 +383,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     saveSession({ threadTs: null });
 
     const { text } = (req.params.arguments ?? {}) as { text?: string };
-    if (text) {
-      await b.postThreaded({ text });
-      log('new thread started with message');
-      return textResult('New thread started.');
-    }
-
-    log('thread reset — next reply starts a new thread');
-    return textResult('Thread reset. Next reply will start a new thread.');
+    const label = getSessionLabel();
+    const header = `\u{1F4E1} ${label}`;
+    const fullText = text ? `${header}\n${text}` : header;
+    await b.postThreaded({ text: fullText });
+    log('new thread started with message');
+    return textResult('New thread started.');
   }
 
   throw new Error(`unknown tool: ${req.params.name}`);

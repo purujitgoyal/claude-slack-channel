@@ -245,6 +245,7 @@ describe('IPCServer — perm_request handling', () => {
     await server.start();
     const clientThreadTs = '1234567890.000100';
     posterMock.mockResolvedValueOnce(clientThreadTs); // register
+    posterMock.mockResolvedValueOnce('notif-ts'); // client joined notification
 
     const permSlackTs = '1234567890.000200';
     posterMock.mockResolvedValueOnce(permSlackTs); // perm_request button post
@@ -268,9 +269,9 @@ describe('IPCServer — perm_request handling', () => {
     // Wait for server to process
     await delay(200);
 
-    // Poster should be called twice: once for register, once for perm buttons
-    expect(posterMock).toHaveBeenCalledTimes(2);
-    const permCall = posterMock.mock.calls[1][0];
+    // Poster should be called three times: register, client joined notification, perm buttons
+    expect(posterMock).toHaveBeenCalledTimes(3);
+    const permCall = posterMock.mock.calls[2][0];
     expect(permCall.text).toContain('Bash');
     expect(permCall.text).toContain('Allow or Deny');
     expect(permCall.thread_ts).toBe(clientThreadTs);
@@ -287,6 +288,7 @@ describe('IPCServer — perm_request handling', () => {
   test('perm_request stores entry in permRouting map', async () => {
     await server.start();
     posterMock.mockResolvedValueOnce('thread-ts-1'); // register
+    posterMock.mockResolvedValueOnce('notif-ts'); // client joined notification
     posterMock.mockResolvedValueOnce('perm-slack-ts'); // perm buttons
 
     const client = new IPCClient({
@@ -537,6 +539,7 @@ describe('IPCClient — sendPermRequest', () => {
     await server.start();
     posterMock
       .mockResolvedValueOnce('ts-1') // register
+      .mockResolvedValueOnce('notif-ts') // client joined notification
       .mockResolvedValueOnce('perm-ts'); // perm_request buttons
 
     const client = new IPCClient({
@@ -555,9 +558,9 @@ describe('IPCClient — sendPermRequest', () => {
 
     await delay(200);
 
-    // Poster called for register + perm buttons
-    expect(posterMock).toHaveBeenCalledTimes(2);
-    const permCall = posterMock.mock.calls[1][0];
+    // Poster called for register + client joined notification + perm buttons
+    expect(posterMock).toHaveBeenCalledTimes(3);
+    const permCall = posterMock.mock.calls[2][0];
     expect(permCall.text).toContain('Write');
     expect(permCall.thread_ts).toBe('ts-1');
 

@@ -452,6 +452,11 @@ export class IPCServer {
       // Store in connection map
       this.clients.set(sessionId, { label, threadTs, socket });
 
+      // Notify in the main session's thread (no thread_ts = active thread)
+      this.opts
+        .poster({ text: `\u{1F4E1} Client joined: ${label}` })
+        .catch(() => {});
+
       // Send ack
       const ack: RegisterAckMessage = {
         type: 'register_ack',

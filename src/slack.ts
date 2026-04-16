@@ -114,11 +114,11 @@ async function fetchThreadSummary(threadTs: string): Promise<string> {
 // ---------------------------------------------------------------------------
 // forwardInboundMessage — shared helper for all inbound message forwarding
 // ---------------------------------------------------------------------------
-// Used by the three bolt handler call sites below and by the T10 recovery
+// Used by the three bolt handler call sites below and by the recovery
 // helper (recoverMissedMessages). Handles state mutations (setActiveThreadTs,
 // saveSession) appropriate to each message type so each call site stays minimal.
 //
-// Returns the eventTs that was forwarded — useful for cursor advancement in T9.
+// Returns the eventTs that was forwarded — useful for cursor advancement.
 // ---------------------------------------------------------------------------
 
 type InboundMessage =
@@ -214,6 +214,17 @@ async function forwardInboundMessage(
 // Bolt handlers — registered on the App instance during startSlack()
 // ---------------------------------------------------------------------------
 
+/**
+ * Dedup gate — drop replayed or already-seen events.
+ * Slack event_ts is zero-padded "seconds.microseconds" (e.g. "1775644620.743929"),
+ * so string comparison is monotonic for timestamps in the same epoch range.
+ * If Slack ever changes the format, this assumption breaks.
+ */
+function isDuplicate(eventTs: string): boolean {
+  const lastSeen = getLastSeenEventTs();
+  return lastSeen !== null && eventTs <= lastSeen;
+}
+
 function registerBoltHandlers(mcp: Server) {
   // Inbound channel messages — only forward active thread replies
   bolt!.message(async ({ message }) => {
@@ -237,12 +248,7 @@ function registerBoltHandlers(mcp: Server) {
     // Top-level message (no thread) — ignore, only @mentions start threads
     if (!threadTs) return;
 
-    // Dedup gate — drop replayed or already-seen events.
-    // Slack event_ts is zero-padded "seconds.microseconds" (e.g. "1775644620.743929"),
-    // so string comparison is monotonic for timestamps in the same epoch range.
-    // If Slack ever changes the format, this assumption breaks.
-    const lastSeen = getLastSeenEventTs();
-    if (lastSeen !== null && eventTs <= lastSeen) return;
+    if (isDuplicate(eventTs)) return;
 
     const activeThreadTs = getActiveThreadTs();
 
@@ -278,12 +284,7 @@ function registerBoltHandlers(mcp: Server) {
     const text = stripMentions(event.text ?? '');
     const eventTs = event.ts ?? '';
 
-    // Dedup gate — drop replayed or already-seen events.
-    // Slack event_ts is zero-padded "seconds.microseconds" (e.g. "1775644620.743929"),
-    // so string comparison is monotonic for timestamps in the same epoch range.
-    // If Slack ever changes the format, this assumption breaks.
-    const lastSeen = getLastSeenEventTs();
-    if (lastSeen !== null && eventTs <= lastSeen) return;
+    if (isDuplicate(eventTs)) return;
 
     await forwardInboundMessage(mcp, {
       type: 'app_mention',
@@ -657,7 +658,7 @@ export async function startSlack(opts: {
   await bolt.start();
   log('Bolt Socket Mode connected');
 
-  // Capture bot user ID for use by recovery filtering (T10).
+  // Capture bot user ID for use by recovery filtering.
   // Wrapped in try/catch so a failure here does not abort startup.
   try {
     const authResult = await bolt.client.auth.test();

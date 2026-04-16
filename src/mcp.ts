@@ -5,11 +5,15 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import {
-  codePreviewBlock,
+  buildPermissionBlocks,
   formatInputPreview,
+  getSessionLabel,
   log,
+  SOCKET_PATH,
   textResult,
 } from './config.ts';
+import { IPCClient } from './ipc.ts';
+import { LockHeldError } from './lock.ts';
 import {
   pendingPermissions,
   saveSession,
@@ -42,17 +46,41 @@ function requireBridge(): SlackBridge {
 }
 
 // ---------------------------------------------------------------------------
-// Channel active flag
+// IPC client — used in client mode to relay through the active session
 // ---------------------------------------------------------------------------
 
-let channelActive = false;
+let ipcClient: IPCClient | null = null;
 
-export function setChannelActive(active: boolean): void {
-  channelActive = active;
+export function getIpcClient(): IPCClient | null {
+  return ipcClient;
 }
 
-export function isChannelActive(): boolean {
-  return channelActive;
+export function setIpcClient(c: IPCClient | null): void {
+  ipcClient = c;
+}
+
+// ---------------------------------------------------------------------------
+// Session mode: dormant → connected (owns Slack bridge) or client (IPC relay)
+// ---------------------------------------------------------------------------
+
+export type Mode = 'dormant' | 'connected' | 'client';
+
+let mode: Mode = 'dormant';
+
+export function getMode(): Mode {
+  return mode;
+}
+
+export function setMode(m: Mode): void {
+  mode = m;
+}
+
+export function isConnected(): boolean {
+  return mode === 'connected';
+}
+
+export function isClient(): boolean {
+  return mode === 'client';
 }
 
 // ---------------------------------------------------------------------------
@@ -83,8 +111,8 @@ Inbound messages arrive as:
   <channel source="slack" slack_user_id="U01..." channel_id="C01..." event_ts="...">message text</channel>
 
 TOOLS:
-- connect: Call this first to activate the Slack bridge in this session. Only one session can be
-  connected at a time. Other sessions remain dormant until you call connect.
+- connect: Call this first. If no other session is active, you become the connected session.
+  If another session is already connected, you enter client mode (relay through it).
 - reply: Respond within the active thread. Use for replying to user messages and ongoing conversation.
 - new_thread: Start a fresh thread. Use to proactively reach the user (status updates, questions, alerts),
   or after /compact or /clear. Pass text to post the first message immediately.
@@ -117,10 +145,19 @@ IMPORTANT — TOOL ROUTING:
 This channel is primarily used in multi-repo coordination sessions — the user
 may be away from the terminal and relying on Slack to monitor progress and
 approve tool use.
+
+MODES (after calling connect):
+- Connected: "Connected to Slack." — full two-way messaging + permission relay.
+- Client: "Connected as client..." — outbound only, own thread, no inbound messages.
+  Note: \`react\` is limited in client mode — you can only react to messages in your own thread
+  (using \`ts\` values from \`send_ack\` responses), not to inbound messages you don't receive.
+- Dormant: tools error, call connect first.
+
+Always call connect. The response tells you which mode you're in.
 `.trim();
 
 export const mcp = new Server(
-  { name: 'slack-channel', version: '0.8.1' },
+  { name: 'slack-channel', version: '0.9.0' },
   {
     capabilities: {
       experimental: {
@@ -140,7 +177,7 @@ export const mcp = new Server(
 const CONNECT_TOOL = {
   name: 'connect',
   description:
-    'Connect this session to the Slack channel. Only one session can be connected at a time. Call this before using reply/new_thread/react.',
+    'Connect this session to the Slack channel. If another session is already connected, enters client mode with relay. Call this before using reply/new_thread/react.',
   inputSchema: {
     type: 'object' as const,
     properties: {},
@@ -150,7 +187,7 @@ const CONNECT_TOOL = {
 const DISCONNECT_TOOL = {
   name: 'disconnect',
   description:
-    'Disconnect this session from the Slack channel, releasing the lock so another session can connect.',
+    'Disconnect this session from the Slack channel. In connected mode, releases the lock. In client mode, disconnects from relay.',
   inputSchema: {
     type: 'object' as const,
     properties: {},
@@ -217,14 +254,71 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'connect') {
-    if (channelActive) return textResult('Already connected.');
+    if (getMode() === 'connected') return textResult('Already connected.');
+    if (getMode() === 'client')
+      return textResult('Already connected as client.');
     if (!injectedActivate) throw new Error('activate function not set');
-    await injectedActivate();
-    return textResult('Connected to Slack.');
+    try {
+      await injectedActivate();
+      return textResult('Connected to Slack.');
+    } catch (err) {
+      if (err instanceof LockHeldError) {
+        try {
+          const client = new IPCClient({
+            socketPath: SOCKET_PATH,
+            sessionId: crypto.randomUUID(),
+            label: getSessionLabel(),
+            onPermResponse: (requestId, behavior) => {
+              mcp.notification({
+                method: 'notifications/claude/channel/permission',
+                params: { request_id: requestId, behavior },
+              });
+            },
+            onDisconnect: ({ graceful }) => {
+              ipcClient = null;
+              setMode('dormant');
+              const reason = graceful
+                ? 'Connected session disconnected — degraded to dormant'
+                : 'IPC connection lost unexpectedly — degraded to dormant';
+              log(reason);
+              mcp
+                .notification({
+                  method: 'notifications/claude/channel',
+                  params: {
+                    content: `${reason}. Call connect to become the main session.`,
+                  },
+                })
+                .catch(() => {});
+            },
+          });
+          await client.connect();
+          ipcClient = client;
+          setMode('client');
+          return textResult(
+            'Connected as client \u2014 messages and permissions relay through the active session. You have your own thread.',
+          );
+        } catch (ipcErr) {
+          log(`IPC connect failed: ${ipcErr}`);
+          setMode('dormant');
+          return textResult(
+            'No active session found \u2014 call connect in another session first.',
+          );
+        }
+      }
+      throw err;
+    }
   }
 
   if (req.params.name === 'disconnect') {
-    if (!channelActive) return textResult('Not connected.');
+    if (getMode() === 'dormant') return textResult('Not connected.');
+    if (getMode() === 'client') {
+      if (ipcClient) {
+        ipcClient.close();
+        ipcClient = null;
+      }
+      setMode('dormant');
+      return textResult('Disconnected from relay.');
+    }
     if (!injectedDeactivate) throw new Error('deactivate function not set');
     await injectedDeactivate();
     return textResult(
@@ -232,8 +326,41 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     );
   }
 
-  if (!channelActive)
-    throw new Error('slack channel is not active — call connect first');
+  if (getMode() === 'dormant')
+    throw new Error(
+      'Slack channel is not active — call connect first. If you were in client mode, the connected session may have disconnected.',
+    );
+
+  // ── Client mode: forward tool calls over IPC ──
+  if (getMode() === 'client') {
+    if (!ipcClient)
+      throw new Error('Slack relay lost — call connect to reconnect.');
+
+    if (req.params.name === 'reply') {
+      const { text } = req.params.arguments as { text: string };
+      await ipcClient.sendMessage(text);
+      return textResult('sent');
+    }
+
+    if (req.params.name === 'react') {
+      const { emoji, event_ts } = req.params.arguments as {
+        emoji: string;
+        event_ts: string;
+      };
+      await ipcClient.addReaction(emoji, event_ts);
+      return textResult('reacted');
+    }
+
+    if (req.params.name === 'new_thread') {
+      const { text } = (req.params.arguments ?? {}) as { text?: string };
+      await ipcClient.newThread(text);
+      return textResult('New thread started.');
+    }
+
+    throw new Error(`unknown tool: ${req.params.name}`);
+  }
+
+  // ── Connected mode: use the local Slack bridge directly ──
   const b = requireBridge();
 
   if (req.params.name === 'reply') {
@@ -256,14 +383,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     saveSession({ threadTs: null });
 
     const { text } = (req.params.arguments ?? {}) as { text?: string };
-    if (text) {
-      await b.postThreaded({ text });
-      log('new thread started with message');
-      return textResult('New thread started.');
-    }
-
-    log('thread reset — next reply starts a new thread');
-    return textResult('Thread reset. Next reply will start a new thread.');
+    const label = getSessionLabel();
+    const header = `\u{1F4E1} ${label}`;
+    const fullText = text ? `${header}\n${text}` : header;
+    await b.postThreaded({ text: fullText });
+    log('new thread started with message');
+    return textResult('New thread started.');
   }
 
   throw new Error(`unknown tool: ${req.params.name}`);
@@ -284,42 +409,30 @@ const PermissionRequestSchema = z.object({
 });
 
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
-  const b = requireBridge();
   const { request_id, tool_name, description, input_preview } = params;
+
+  // ── Dormant mode: silently ignore — CC falls back to terminal ──
+  if (getMode() === 'dormant') return;
+
+  // ── Client mode: forward over IPC to the connected session ──
+  if (getMode() === 'client') {
+    if (!ipcClient) return; // relay lost — CC falls back to terminal
+    ipcClient.sendPermRequest(
+      request_id,
+      tool_name,
+      description,
+      input_preview,
+    );
+    return;
+  }
+
+  // ── Connected mode: post buttons to Slack directly ──
+  const b = requireBridge();
   const preview = formatInputPreview(tool_name, input_preview);
 
   await b.postThreaded({
     text: `Claude wants to use \`${tool_name}\` — tap Allow or Deny`,
-    blocks: [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*Claude wants to use \`${tool_name}\`*\n${description}`,
-        },
-      },
-      ...codePreviewBlock(preview),
-      {
-        type: 'actions',
-        block_id: `permission_${request_id}`,
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Allow' },
-            style: 'primary',
-            action_id: `allow_${request_id}`,
-            value: `allow:${request_id}`,
-          },
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Deny' },
-            style: 'danger',
-            action_id: `deny_${request_id}`,
-            value: `deny:${request_id}`,
-          },
-        ],
-      },
-    ],
+    blocks: buildPermissionBlocks(request_id, tool_name, description, preview),
   });
   pendingPermissions.set(request_id, {
     tool_name,

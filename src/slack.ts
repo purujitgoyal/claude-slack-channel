@@ -1,6 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { App } from '@slack/bolt';
 import { codePreviewBlock, log, stripMentions } from './config.ts';
+import { routeVerdict } from './ipc.ts';
 import {
   getActiveThreadTs,
   getLastSeenEventTs,
@@ -42,7 +43,28 @@ export function resetBotUserId(): void {
 export async function postThreaded(opts: {
   text: string;
   blocks?: any[];
+  thread_ts?: string;
 }): Promise<string | undefined> {
+  // Empty string = explicitly top-level (used by IPC server to create client
+  // thread headers). Non-empty = post in that thread. Omitted = use active thread.
+  if (opts.thread_ts === '') {
+    const result = await bolt!.client.chat.postMessage({
+      channel: channelId,
+      text: opts.text,
+      blocks: opts.blocks,
+    });
+    return result.ts;
+  }
+  if (opts.thread_ts) {
+    const result = await bolt!.client.chat.postMessage({
+      channel: channelId,
+      text: opts.text,
+      blocks: opts.blocks,
+      thread_ts: opts.thread_ts,
+    });
+    return result.ts;
+  }
+
   const activeThreadTs = getActiveThreadTs();
   const result = await bolt!.client.chat.postMessage({
     channel: channelId,
@@ -100,11 +122,11 @@ async function fetchThreadSummary(threadTs: string): Promise<string> {
 // ---------------------------------------------------------------------------
 // forwardInboundMessage — shared helper for all inbound message forwarding
 // ---------------------------------------------------------------------------
-// Used by the three bolt handler call sites below and by the T10 recovery
+// Used by the three bolt handler call sites below and by the recovery
 // helper (recoverMissedMessages). Handles state mutations (setActiveThreadTs,
 // saveSession) appropriate to each message type so each call site stays minimal.
 //
-// Returns the eventTs that was forwarded — useful for cursor advancement in T9.
+// Returns the eventTs that was forwarded — useful for cursor advancement.
 // ---------------------------------------------------------------------------
 
 type InboundMessage =
@@ -200,6 +222,17 @@ async function forwardInboundMessage(
 // Bolt handlers — registered on the App instance during startSlack()
 // ---------------------------------------------------------------------------
 
+/**
+ * Dedup gate — drop replayed or already-seen events.
+ * Slack event_ts is zero-padded "seconds.microseconds" (e.g. "1775644620.743929"),
+ * so string comparison is monotonic for timestamps in the same epoch range.
+ * If Slack ever changes the format, this assumption breaks.
+ */
+function isDuplicate(eventTs: string): boolean {
+  const lastSeen = getLastSeenEventTs();
+  return lastSeen !== null && eventTs <= lastSeen;
+}
+
 function registerBoltHandlers(mcp: Server) {
   // Inbound channel messages — only forward active thread replies
   bolt!.message(async ({ message }) => {
@@ -223,12 +256,7 @@ function registerBoltHandlers(mcp: Server) {
     // Top-level message (no thread) — ignore, only @mentions start threads
     if (!threadTs) return;
 
-    // Dedup gate — drop replayed or already-seen events.
-    // Slack event_ts is zero-padded "seconds.microseconds" (e.g. "1775644620.743929"),
-    // so string comparison is monotonic for timestamps in the same epoch range.
-    // If Slack ever changes the format, this assumption breaks.
-    const lastSeen = getLastSeenEventTs();
-    if (lastSeen !== null && eventTs <= lastSeen) return;
+    if (isDuplicate(eventTs)) return;
 
     const activeThreadTs = getActiveThreadTs();
 
@@ -264,12 +292,7 @@ function registerBoltHandlers(mcp: Server) {
     const text = stripMentions(event.text ?? '');
     const eventTs = event.ts ?? '';
 
-    // Dedup gate — drop replayed or already-seen events.
-    // Slack event_ts is zero-padded "seconds.microseconds" (e.g. "1775644620.743929"),
-    // so string comparison is monotonic for timestamps in the same epoch range.
-    // If Slack ever changes the format, this assumption breaks.
-    const lastSeen = getLastSeenEventTs();
-    if (lastSeen !== null && eventTs <= lastSeen) return;
+    if (isDuplicate(eventTs)) return;
 
     await forwardInboundMessage(mcp, {
       type: 'app_mention',
@@ -284,6 +307,11 @@ function registerBoltHandlers(mcp: Server) {
   });
 
   // Permission relay — receive verdict from Allow/Deny button click
+  //
+  // Three-way routing:
+  //   1. Client perm (in IPC routing map) → send perm_response to client socket
+  //   2. Connected session's own perm (in pendingPermissions) → mcp.notification()
+  //   3. Stale button (neither map) → update message with stale text
   bolt!.action(/^(allow|deny)_.+$/, async ({ action, ack, body, client }) => {
     await ack();
 
@@ -301,50 +329,77 @@ function registerBoltHandlers(mcp: Server) {
     if (resolvedPermissions.has(request_id)) return;
     resolvedPermissions.add(request_id);
 
-    try {
-      await mcp.notification({
-        method: 'notifications/claude/channel/permission',
-        params: { request_id, behavior },
-      });
-    } catch (err) {
-      resolvedPermissions.delete(request_id);
-      log(`failed to send verdict for ${request_id}: ${err}`);
-      return;
-    }
-
-    const details = pendingPermissions.get(request_id);
-    pendingPermissions.delete(request_id);
-    log(`verdict ${behavior} for request ${request_id}`);
-
-    // Update the Slack message — replace buttons with outcome text
+    // Helper to update the Slack message with outcome text
     const message = body.message as { ts?: string } | undefined;
     const msgChannelId =
       (body.container as { channel_id?: string } | undefined)?.channel_id ??
       channelId;
 
-    const label = behavior === 'allow' ? 'Allowed' : 'Denied';
-    const preview = details?.input_preview ?? '';
-    const summaryText = details
-      ? `*${label}* — \`${details.tool_name}\``
-      : `*${label}* — request \`${request_id}\``;
-
-    if (message?.ts && msgChannelId) {
-      await client.chat.update({
-        channel: msgChannelId,
-        ts: message.ts,
-        text: summaryText,
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: summaryText,
+    const updateMessage = async (
+      summaryText: string,
+      preview: string,
+    ): Promise<void> => {
+      if (message?.ts && msgChannelId) {
+        await client.chat.update({
+          channel: msgChannelId,
+          ts: message.ts,
+          text: summaryText,
+          blocks: [
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: summaryText,
+              },
             },
-          },
-          ...codePreviewBlock(preview),
-        ],
-      });
+            ...codePreviewBlock(preview),
+          ],
+        });
+      }
+    };
+
+    // ── Path 1: Client perm (IPC routing map) ──
+    const routeResult = routeVerdict(request_id, behavior);
+    if (routeResult.routed) {
+      const { toolName, inputPreview } = routeResult.details;
+      const label = behavior === 'allow' ? 'Allowed' : 'Denied';
+      const summaryText = `*${label}* — \`${toolName}\``;
+      log(`verdict ${behavior} for client request ${request_id}`);
+      await updateMessage(summaryText, inputPreview);
+      return;
     }
+
+    // ── Path 2: Connected session's own perm ──
+    if (pendingPermissions.has(request_id)) {
+      try {
+        await mcp.notification({
+          method: 'notifications/claude/channel/permission',
+          params: { request_id, behavior },
+        });
+      } catch (err) {
+        resolvedPermissions.delete(request_id);
+        log(`failed to send verdict for ${request_id}: ${err}`);
+        return;
+      }
+
+      const details = pendingPermissions.get(request_id);
+      pendingPermissions.delete(request_id);
+      log(`verdict ${behavior} for request ${request_id}`);
+
+      const label = behavior === 'allow' ? 'Allowed' : 'Denied';
+      const preview = details?.input_preview ?? '';
+      const summaryText = details
+        ? `*${label}* — \`${details.tool_name}\``
+        : `*${label}* — request \`${request_id}\``;
+      await updateMessage(summaryText, preview);
+      return;
+    }
+
+    // ── Path 3: Stale button (neither map) ──
+    log(`stale verdict ${behavior} for unknown request ${request_id}`);
+    const staleText =
+      'Stale request from a previous session — ignore or approve at the terminal if still needed.';
+    await updateMessage(staleText, '');
   });
 }
 
@@ -611,7 +666,7 @@ export async function startSlack(opts: {
   await bolt.start();
   log('Bolt Socket Mode connected');
 
-  // Capture bot user ID for use by recovery filtering (T10).
+  // Capture bot user ID for use by recovery filtering.
   // Wrapped in try/catch so a failure here does not abort startup.
   try {
     const authResult = await bolt.client.auth.test();

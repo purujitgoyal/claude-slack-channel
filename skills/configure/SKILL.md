@@ -95,6 +95,7 @@ Tell the user:
 > ```
 >
 > Call the `connect` tool to activate the Slack bridge in your session.
+> Additional sessions calling `connect` automatically enter client mode — each gets its own thread.
 > Then @mention the bot in your channel to start a conversation.
 > Permission prompts appear as Allow/Deny buttons in the active thread.
 >

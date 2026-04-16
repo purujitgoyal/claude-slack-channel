@@ -70,6 +70,10 @@ mock.module('@slack/bolt', () => {
 });
 
 // ---------------------------------------------------------------------------
+// IPC verdict routing — use the real routeVerdict controlled via setActiveServer
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Import modules under test
 // ---------------------------------------------------------------------------
 
@@ -84,6 +88,7 @@ const {
   resolvedPermissions,
   pendingPermissions,
 } = await import('../src/session');
+const { setActiveServer } = await import('../src/ipc');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -141,9 +146,12 @@ describe('Bolt Handlers', () => {
     resolvedPermissions.clear();
     pendingPermissions.clear();
     mcpMock.notification.mockClear();
+    // No active IPC server by default — routeVerdict returns { routed: false }
+    setActiveServer(null);
   });
 
   afterEach(async () => {
+    setActiveServer(null);
     await stopSlack();
     resetBotUserId();
   });
@@ -596,7 +604,12 @@ describe('Bolt Handlers', () => {
       expect(payload.ack).toHaveBeenCalledTimes(1);
     });
 
-    test('sends allow verdict to MCP', async () => {
+    test('sends allow verdict to MCP for connected-session perm', async () => {
+      pendingPermissions.set('req_1', {
+        tool_name: 'Bash',
+        description: 'Run a command',
+        input_preview: 'git status',
+      });
       const payload = makeActionPayload('allow_req_1', 'allow:req_1');
       await simulateAction('allow_req_1', payload);
 
@@ -608,7 +621,12 @@ describe('Bolt Handlers', () => {
       );
     });
 
-    test('sends deny verdict to MCP', async () => {
+    test('sends deny verdict to MCP for connected-session perm', async () => {
+      pendingPermissions.set('req_2', {
+        tool_name: 'Edit',
+        description: 'Edit a file',
+        input_preview: 'src/slack.ts',
+      });
       const payload = makeActionPayload('deny_req_2', 'deny:req_2');
       await simulateAction('deny_req_2', payload);
 
@@ -621,6 +639,11 @@ describe('Bolt Handlers', () => {
     });
 
     test('updates Slack message to show allow verdict', async () => {
+      pendingPermissions.set('req_1', {
+        tool_name: 'Bash',
+        description: 'Run a command',
+        input_preview: 'git status',
+      });
       const payload = makeActionPayload('allow_req_1', 'allow:req_1');
       await simulateAction('allow_req_1', payload);
 
@@ -634,6 +657,11 @@ describe('Bolt Handlers', () => {
     });
 
     test('updates Slack message to show deny verdict', async () => {
+      pendingPermissions.set('req_1', {
+        tool_name: 'Bash',
+        description: 'Run a command',
+        input_preview: 'git status',
+      });
       const payload = makeActionPayload('deny_req_1', 'deny:req_1');
       await simulateAction('deny_req_1', payload);
 
@@ -645,6 +673,11 @@ describe('Bolt Handlers', () => {
     });
 
     test('ignores duplicate resolution for same request_id', async () => {
+      pendingPermissions.set('req_dup', {
+        tool_name: 'Bash',
+        description: 'Run a command',
+        input_preview: 'git status',
+      });
       const p1 = makeActionPayload('allow_req_dup', 'allow:req_dup');
       const p2 = makeActionPayload('allow_req_dup', 'allow:req_dup');
 
@@ -676,6 +709,11 @@ describe('Bolt Handlers', () => {
     });
 
     test('handles request_id containing colons', async () => {
+      pendingPermissions.set('tool:Bash:cmd', {
+        tool_name: 'Bash',
+        description: 'Run a command',
+        input_preview: 'git status',
+      });
       const payload = makeActionPayload(
         'allow_complex_id',
         'allow:tool:Bash:cmd',
@@ -714,13 +752,13 @@ describe('Bolt Handlers', () => {
       expect(codeBlock.text.text).toContain('```');
     });
 
-    test('falls back to request_id when pendingPermissions has no entry', async () => {
+    test('shows stale message when pendingPermissions has no entry and routeVerdict returns false', async () => {
       const payload = makeActionPayload('allow_req_1', 'allow:req_1');
       await simulateAction('allow_req_1', payload);
 
       expect(payload.client.chat.update).toHaveBeenCalledWith(
         expect.objectContaining({
-          text: expect.stringContaining('req_1'),
+          text: expect.stringContaining('Stale request'),
         }),
       );
     });
@@ -738,6 +776,11 @@ describe('Bolt Handlers', () => {
     });
 
     test('MCP notification failure removes from resolvedPermissions (allows retry)', async () => {
+      pendingPermissions.set('req_1', {
+        tool_name: 'Bash',
+        description: 'Run a command',
+        input_preview: 'git status',
+      });
       mcpMock.notification.mockRejectedValueOnce(new Error('transport dead'));
       const payload = makeActionPayload('allow_req_1', 'allow:req_1');
       await simulateAction('allow_req_1', payload);
@@ -746,13 +789,209 @@ describe('Bolt Handlers', () => {
       // Message not updated on failure
       expect(payload.client.chat.update).not.toHaveBeenCalled();
 
-      // Retry succeeds
+      // Retry succeeds — re-add to pendingPermissions since it wasn't consumed
+      pendingPermissions.set('req_1', {
+        tool_name: 'Bash',
+        description: 'Run a command',
+        input_preview: 'git status',
+      });
       mcpMock.notification.mockResolvedValueOnce(undefined as any);
       const retry = makeActionPayload('allow_req_1', 'allow:req_1');
       await simulateAction('allow_req_1', retry);
 
       expect(mcpMock.notification).toHaveBeenCalledTimes(2);
       expect(retry.client.chat.update).toHaveBeenCalled();
+    });
+
+    // =========================================================================
+    // Three-way verdict routing
+    // =========================================================================
+
+    /**
+     * Build a minimal fake IPCServer with a permRouting map and sendTo stub.
+     * setActiveServer(fakeServer) makes routeVerdict() use it.
+     */
+    function makeFakeServer(
+      entries?: Record<
+        string,
+        {
+          sessionId: string;
+          toolName: string;
+          description: string;
+          inputPreview: string;
+        }
+      >,
+    ) {
+      const permRouting = new Map<string, any>();
+      if (entries) {
+        for (const [id, e] of Object.entries(entries)) {
+          permRouting.set(id, {
+            ...e,
+            slackTs: '5000.0001',
+            timestamp: Date.now(),
+          });
+        }
+      }
+      const sendToMock = mock(() => true);
+      const fakeServer = {
+        permRouting,
+        clients: new Map([
+          [
+            'sess-1',
+            {
+              label: 'test',
+              threadTs: 'ts-1',
+              socket: { write: mock(() => 1) },
+            },
+          ],
+        ]),
+        sendTo: sendToMock,
+      };
+      return { fakeServer, sendToMock };
+    }
+
+    test('client perm: routes via routeVerdict, does NOT call mcp.notification', async () => {
+      const { fakeServer } = makeFakeServer({
+        req_client: {
+          sessionId: 'sess-1',
+          toolName: 'Bash',
+          description: 'Run a command',
+          inputPreview: 'git status',
+        },
+      });
+      setActiveServer(fakeServer as any);
+
+      const payload = makeActionPayload('allow_req_client', 'allow:req_client');
+      await simulateAction('allow_req_client', payload);
+
+      // MCP notification must NOT be called (client handles its own)
+      expect(mcpMock.notification).not.toHaveBeenCalled();
+
+      // Slack message updated with tool details from routing map
+      expect(payload.client.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('`Bash`'),
+        }),
+      );
+    });
+
+    test('client perm deny: routes and updates message with Denied', async () => {
+      const { fakeServer } = makeFakeServer({
+        req_cd: {
+          sessionId: 'sess-1',
+          toolName: 'Edit',
+          description: 'Edit a file',
+          inputPreview: 'src/config.ts',
+        },
+      });
+      setActiveServer(fakeServer as any);
+
+      const payload = makeActionPayload('deny_req_cd', 'deny:req_cd');
+      await simulateAction('deny_req_cd', payload);
+
+      expect(mcpMock.notification).not.toHaveBeenCalled();
+      expect(payload.client.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('Denied'),
+        }),
+      );
+      expect(payload.client.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('`Edit`'),
+        }),
+      );
+    });
+
+    test('client perm: includes inputPreview in Slack message blocks', async () => {
+      const { fakeServer } = makeFakeServer({
+        req_p: {
+          sessionId: 'sess-1',
+          toolName: 'Bash',
+          description: 'Run a command',
+          inputPreview: 'rm -rf /tmp/test',
+        },
+      });
+      setActiveServer(fakeServer as any);
+
+      const payload = makeActionPayload('allow_req_p', 'allow:req_p');
+      await simulateAction('allow_req_p', payload);
+
+      const call = payload.client.chat.update.mock.calls[0][0];
+      const codeBlock = call.blocks.find(
+        (b: any) =>
+          b.type === 'section' && b.text?.text?.includes('rm -rf /tmp/test'),
+      );
+      expect(codeBlock).toBeDefined();
+    });
+
+    test('client perm: removes entry from permRouting after verdict', async () => {
+      const { fakeServer } = makeFakeServer({
+        req_rm: {
+          sessionId: 'sess-1',
+          toolName: 'Bash',
+          description: 'Run a command',
+          inputPreview: 'git status',
+        },
+      });
+      setActiveServer(fakeServer as any);
+
+      const payload = makeActionPayload('allow_req_rm', 'allow:req_rm');
+      await simulateAction('allow_req_rm', payload);
+
+      expect(fakeServer.permRouting.has('req_rm')).toBe(false);
+    });
+
+    test('stale button: neither routing map nor pendingPermissions', async () => {
+      // No active server, no pendingPermissions entry
+      const payload = makeActionPayload('allow_req_stale', 'allow:req_stale');
+      await simulateAction('allow_req_stale', payload);
+
+      // No MCP notification
+      expect(mcpMock.notification).not.toHaveBeenCalled();
+
+      // Slack message updated with stale text
+      expect(payload.client.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('Stale request'),
+        }),
+      );
+    });
+
+    test('stale button: message mentions terminal fallback', async () => {
+      const payload = makeActionPayload('deny_req_gone', 'deny:req_gone');
+      await simulateAction('deny_req_gone', payload);
+
+      expect(payload.client.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('terminal'),
+        }),
+      );
+    });
+
+    test('connected-session perm: falls through when not in routing map', async () => {
+      // No active server (routeVerdict returns { routed: false })
+      pendingPermissions.set('req_own', {
+        tool_name: 'Read',
+        description: 'Read a file',
+        input_preview: 'package.json',
+      });
+      const payload = makeActionPayload('allow_req_own', 'allow:req_own');
+      await simulateAction('allow_req_own', payload);
+
+      // Falls through to mcp.notification path
+      expect(mcpMock.notification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: 'notifications/claude/channel/permission',
+          params: { request_id: 'req_own', behavior: 'allow' },
+        }),
+      );
+
+      // Slack message updated with tool name
+      expect(payload.client.chat.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('`Read`'),
+        }),
+      );
     });
   });
 

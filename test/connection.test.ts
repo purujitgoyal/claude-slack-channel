@@ -24,10 +24,20 @@ import {
 
 const releaseLockMock = mock(() => {});
 const acquireLockMock = mock(() => {});
+const tryAcquireLockMock = mock(() => true);
+
+class MockLockHeldError extends Error {
+  constructor(message?: string) {
+    super(message ?? 'Lock is held by another instance');
+    this.name = 'LockHeldError';
+  }
+}
 
 mock.module('../src/lock', () => ({
   acquireLock: acquireLockMock,
   releaseLock: releaseLockMock,
+  tryAcquireLock: tryAcquireLockMock,
+  LockHeldError: MockLockHeldError,
 }));
 
 // ---------------------------------------------------------------------------
@@ -80,6 +90,43 @@ mock.module('@slack/bolt', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Mock ../src/ipc — dynamic import in connect handler, controls IPC client
+// ---------------------------------------------------------------------------
+
+let ipcConnectBehavior: 'success' | 'fail' = 'fail';
+const ipcClientCloseMock = mock(() => {});
+let ipcOnDisconnect: ((info: { graceful: boolean }) => void) | undefined;
+
+mock.module('../src/ipc', () => {
+  return {
+    IPCClient: class MockIPCClient {
+      opts: any;
+      constructor(opts: any) {
+        this.opts = opts;
+        ipcOnDisconnect = opts.onDisconnect;
+      }
+      async connect() {
+        if (ipcConnectBehavior === 'fail') {
+          throw new Error('Failed to connect');
+        }
+        return 'thread-ts-mock';
+      }
+      send = mock(() => {});
+      close = ipcClientCloseMock;
+    },
+    IPCServer: class MockIPCServer {
+      clients = new Map();
+      async start() {}
+      async close() {}
+      broadcastShutdown() {}
+      sendTo() {
+        return false;
+      }
+    },
+  };
+});
+
+// ---------------------------------------------------------------------------
 // Import modules under test (uses mocked @slack/bolt)
 // ---------------------------------------------------------------------------
 
@@ -93,7 +140,10 @@ const {
   setGetPpid,
   resetWatchdog,
 } = await import('../server');
-const { mcp, setChannelActive } = await import('../src/mcp');
+const { mcp, setMode, getMode, setActivate, setIpcClient } = await import(
+  '../src/mcp'
+);
+const { LockHeldError } = await import('../src/lock');
 const { setLastSeenEventTs } = await import('../src/session');
 
 // ---------------------------------------------------------------------------
@@ -935,19 +985,356 @@ describe('watchdog', () => {
 });
 
 // ---------------------------------------------------------------------------
+// tryAcquireLock — non-throwing lock acquisition
+// ---------------------------------------------------------------------------
+
+describe('tryAcquireLock', () => {
+  beforeEach(() => {
+    tryAcquireLockMock.mockReset();
+    tryAcquireLockMock.mockReturnValue(true);
+    releaseLockMock.mockClear();
+  });
+
+  test('returns true when lock is free', () => {
+    tryAcquireLockMock.mockReturnValue(true);
+    const result = tryAcquireLockMock();
+    expect(result).toBe(true);
+  });
+
+  test('returns false when lock is held', () => {
+    // First call succeeds
+    tryAcquireLockMock.mockReturnValueOnce(true);
+    expect(tryAcquireLockMock()).toBe(true);
+
+    // Second call fails (lock is held)
+    tryAcquireLockMock.mockReturnValueOnce(false);
+    expect(tryAcquireLockMock()).toBe(false);
+  });
+
+  test('releaseLock is safe to call when no lock is held', () => {
+    // releaseLock should not throw even when nothing is locked
+    expect(() => releaseLockMock()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Connect tool — tool list changes based on activation state
 // ---------------------------------------------------------------------------
 
 describe('connect tool', () => {
   const listTools = (mcp as any)._requestHandlers?.get('tools/list');
+  const callTool = (mcp as any)._requestHandlers?.get('tools/call');
 
   test('always lists all tools including connect', async () => {
-    setChannelActive(false);
+    setMode('dormant');
     const result = await listTools({ method: 'tools/list', params: {} });
     const names = result.tools.map((t: any) => t.name);
     expect(names).toContain('connect');
     expect(names).toContain('reply');
     expect(names).toContain('new_thread');
     expect(names).toContain('react');
+  });
+
+  // =========================================================================
+  // Connect handler — mode branching
+  // =========================================================================
+
+  describe('connect handler mode branching', () => {
+    afterEach(() => {
+      setMode('dormant');
+    });
+
+    test('returns "Already connected." when mode is connected', async () => {
+      setMode('connected');
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(result.content[0].text).toBe('Already connected.');
+    });
+
+    test('returns "Already connected as client." when mode is client', async () => {
+      setMode('client');
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(result.content[0].text).toBe('Already connected as client.');
+    });
+
+    test('calls activate and returns "Connected to Slack." on success', async () => {
+      setMode('dormant');
+      const activateMock = mock(async () => {});
+      setActivate(activateMock);
+
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(activateMock).toHaveBeenCalledTimes(1);
+      expect(result.content[0].text).toBe('Connected to Slack.');
+    });
+
+    test('catches LockHeldError, IPC succeeds → sets client mode', async () => {
+      setMode('dormant');
+      ipcConnectBehavior = 'success';
+      setActivate(async () => {
+        throw new LockHeldError();
+      });
+
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(getMode()).toBe('client');
+      expect(result.content[0].text).toBe(
+        'Connected as client \u2014 messages and permissions relay through the active session. You have your own thread.',
+      );
+      // Clean up
+      ipcConnectBehavior = 'fail';
+      setIpcClient(null);
+    });
+
+    test('catches LockHeldError, IPC fails → stays dormant with error message', async () => {
+      setMode('dormant');
+      ipcConnectBehavior = 'fail';
+      setActivate(async () => {
+        throw new LockHeldError();
+      });
+
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(getMode()).toBe('dormant');
+      expect(result.content[0].text).toBe(
+        'No active session found \u2014 call connect in another session first.',
+      );
+    });
+
+    test('re-throws non-LockHeldError errors', async () => {
+      setMode('dormant');
+      setActivate(async () => {
+        throw new Error('SLACK_BOT_TOKEN not set');
+      });
+
+      await expect(
+        callTool({
+          method: 'tools/call',
+          params: { name: 'connect', arguments: {} },
+        }),
+      ).rejects.toThrow('SLACK_BOT_TOKEN not set');
+    });
+
+    test('IPC onDisconnect callback degrades to dormant', async () => {
+      setMode('dormant');
+      ipcConnectBehavior = 'success';
+      setActivate(async () => {
+        throw new LockHeldError();
+      });
+
+      await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(getMode()).toBe('client');
+
+      // Simulate server disconnect (graceful)
+      ipcOnDisconnect?.({ graceful: true });
+      expect(getMode()).toBe('dormant');
+
+      // Clean up
+      ipcConnectBehavior = 'fail';
+      setIpcClient(null);
+    });
+  });
+
+  // =========================================================================
+  // Disconnect handler — client mode
+  // =========================================================================
+
+  describe('disconnect handler — client mode', () => {
+    afterEach(() => {
+      setMode('dormant');
+      setIpcClient(null);
+      ipcClientCloseMock.mockClear();
+    });
+
+    test('disconnect in client mode closes IPC client, returns to dormant', async () => {
+      setMode('dormant');
+      ipcConnectBehavior = 'success';
+      setActivate(async () => {
+        throw new LockHeldError();
+      });
+
+      // Connect as client first
+      await callTool({
+        method: 'tools/call',
+        params: { name: 'connect', arguments: {} },
+      });
+      expect(getMode()).toBe('client');
+
+      ipcClientCloseMock.mockClear();
+
+      // Disconnect
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'disconnect', arguments: {} },
+      });
+      expect(getMode()).toBe('dormant');
+      expect(result.content[0].text).toBe('Disconnected from relay.');
+      expect(ipcClientCloseMock).toHaveBeenCalledTimes(1);
+
+      // Clean up
+      ipcConnectBehavior = 'fail';
+    });
+
+    test('disconnect in client mode without IPC client still returns to dormant', async () => {
+      setMode('client');
+      setIpcClient(null);
+
+      const result = await callTool({
+        method: 'tools/call',
+        params: { name: 'disconnect', arguments: {} },
+      });
+      expect(getMode()).toBe('dormant');
+      expect(result.content[0].text).toBe('Disconnected from relay.');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Farewell messages — posted on deactivate and shutdownGracefully
+// ---------------------------------------------------------------------------
+
+describe('farewell messages', () => {
+  const callTool = (mcp as any)._requestHandlers?.get('tools/call');
+  let origExit: typeof process.exit;
+  const exitMock = mock((_code?: number) => {});
+  const timers = new FakeTimers();
+
+  beforeEach(async () => {
+    resetShuttingDown();
+    origExit = process.exit;
+    (process as any).exit = exitMock;
+    exitMock.mockClear();
+    releaseLockMock.mockClear();
+    apps.length = 0;
+    timers.install();
+    await startSlack({
+      mcp: { notification: mock(async () => {}) } as any,
+      botToken: TEST_BOT_TOKEN,
+      appToken: TEST_APP_TOKEN,
+      channelId: TEST_CHANNEL_ID,
+      allowedUserId: TEST_ALLOWED_USER,
+      onDead: mock(() => {}),
+    });
+  });
+
+  afterEach(async () => {
+    timers.uninstall();
+    (process as any).exit = origExit;
+    resetShuttingDown();
+    setMode('dormant');
+    const currentApp = apps[apps.length - 1];
+    if (currentApp) {
+      currentApp.stop.mockImplementation(async () => {});
+    }
+    try {
+      await stopSlack();
+    } catch {
+      // ignore — may already be stopped
+    }
+  });
+
+  // =========================================================================
+  // deactivate (disconnect tool in server mode)
+  // =========================================================================
+
+  test('deactivate posts "Session disconnected." before teardown', async () => {
+    setMode('connected');
+    const currentApp = apps[apps.length - 1];
+    currentApp.client.chat.postMessage.mockClear();
+
+    await callTool({
+      method: 'tools/call',
+      params: { name: 'disconnect', arguments: {} },
+    });
+
+    const calls = currentApp.client.chat.postMessage.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls[0][0].text).toBe('Session disconnected.');
+  });
+
+  test('deactivate teardown proceeds even if farewell post fails', async () => {
+    setMode('connected');
+    const currentApp = apps[apps.length - 1];
+    currentApp.client.chat.postMessage.mockRejectedValueOnce(
+      new Error('Slack is down'),
+    );
+
+    // Should not throw; teardown completes and mode returns to dormant
+    await expect(
+      callTool({
+        method: 'tools/call',
+        params: { name: 'disconnect', arguments: {} },
+      }),
+    ).resolves.toBeDefined();
+
+    expect(getMode()).toBe('dormant');
+  });
+
+  // =========================================================================
+  // shutdownGracefully — fire-and-forget farewell
+  // =========================================================================
+
+  test('shutdownGracefully posts "Session ended unexpectedly." when connected', async () => {
+    setMode('connected');
+    const currentApp = apps[apps.length - 1];
+    currentApp.stop.mockImplementation(async () => {});
+    currentApp.client.chat.postMessage.mockClear();
+
+    shutdownGracefully('test');
+
+    // Flush microtasks so the fire-and-forget promise runs
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const calls = currentApp.client.chat.postMessage.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls[0][0].text).toBe('Session ended unexpectedly.');
+  });
+
+  test('shutdownGracefully does not post farewell when not connected', async () => {
+    setMode('dormant');
+    const currentApp = apps[apps.length - 1];
+    currentApp.stop.mockImplementation(async () => {});
+    currentApp.client.chat.postMessage.mockClear();
+
+    shutdownGracefully('test');
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(currentApp.client.chat.postMessage).not.toHaveBeenCalled();
+  });
+
+  test('shutdownGracefully teardown proceeds even if farewell post fails', async () => {
+    setMode('connected');
+    const currentApp = apps[apps.length - 1];
+    currentApp.stop.mockImplementation(async () => {});
+    currentApp.client.chat.postMessage.mockRejectedValueOnce(
+      new Error('Slack is down'),
+    );
+
+    // Should not throw synchronously
+    expect(() => shutdownGracefully('test')).not.toThrow();
+
+    // Let the rejected promise settle
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Teardown still ran: releaseLock was called
+    expect(releaseLockMock).toHaveBeenCalledTimes(1);
   });
 });

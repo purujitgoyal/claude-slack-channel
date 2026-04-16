@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { ENV_PATH, loadEnv, log } from './src/config.ts';
-import { acquireLock, releaseLock } from './src/lock.ts';
+import { ENV_PATH, loadEnv, log, SOCKET_PATH } from './src/config.ts';
+import { IPCServer, setActiveServer } from './src/ipc.ts';
+import { LockHeldError, releaseLock, tryAcquireLock } from './src/lock.ts';
 import {
-  isChannelActive,
+  isConnected,
   mcp,
   setActivate,
-  setChannelActive,
   setDeactivate,
+  setMode,
   setSlackBridge,
 } from './src/mcp.ts';
 import {
@@ -55,19 +56,46 @@ export function resetWatchdog(): void {
 }
 
 let watchdogInterval: ReturnType<typeof setInterval> | null = null;
+let ipcServer: IPCServer | null = null;
+
+/** Reset the IPC server reference — exported for test cleanup only. */
+export function resetIpcServer(): void {
+  ipcServer = null;
+}
 
 /**
- * Start the parent-PID watchdog. Called inside activate() after acquireLock().
+ * Start the parent-PID watchdog. Called inside activate() after tryAcquireLock().
  * On macOS/Linux, when a parent process dies the OS reparents the child to
  * pid 1 (init/launchd). We use ppid === 1 as the orphan signal.
  */
 export function startWatchdog(): void {
   watchdogInterval = setInterval(() => {
     if (getPpid() === 1) {
-      shutdownGracefully();
+      shutdownGracefully('watchdog-orphan');
     }
   }, 5000);
   watchdogInterval.unref();
+}
+
+// ---------------------------------------------------------------------------
+// Teardown helpers — shared by activate catch, setDeactivate, shutdownGracefully
+// ---------------------------------------------------------------------------
+
+async function teardownIpc(): Promise<void> {
+  if (ipcServer) {
+    try {
+      await ipcServer.close();
+    } catch {}
+    ipcServer = null;
+    setActiveServer(null);
+  }
+}
+
+function clearWatchdog(): void {
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +132,9 @@ async function activate(): Promise<void> {
     );
   }
 
-  acquireLock();
+  if (!tryAcquireLock()) {
+    throw new LockHeldError();
+  }
   startWatchdog();
 
   try {
@@ -117,26 +147,39 @@ async function activate(): Promise<void> {
       appToken,
       channelId,
       allowedUserId,
-      onDead: shutdownGracefully,
+      onDead: () => shutdownGracefully('slack-dead'),
     });
+
+    const addReaction = (ch: string, name: string, ts: string) =>
+      app.client.reactions
+        .add({ channel: ch, name, timestamp: ts })
+        .then(() => {});
 
     setSlackBridge({
       postThreaded,
-      addReaction: (ch, name, ts) =>
-        app.client.reactions
-          .add({ channel: ch, name, timestamp: ts })
-          .then(() => {}),
+      addReaction,
       channelId,
     });
 
-    setChannelActive(true);
+    // Start IPC server for multi-session relay
+    const server = new IPCServer({
+      socketPath: SOCKET_PATH,
+      poster: postThreaded,
+      messageUpdater: (channel, ts, text, blocks) =>
+        app.client.chat.update({ channel, ts, text, blocks }).then(() => {}),
+      reacter: addReaction,
+      channelId,
+    });
+    await server.start();
+    ipcServer = server;
+    setActiveServer(server);
+
+    setMode('connected');
     log(`channel activated — ${channelId}`);
   } catch (err) {
     log(`activation failed: ${err}`);
-    if (watchdogInterval) {
-      clearInterval(watchdogInterval);
-      watchdogInterval = null;
-    }
+    await teardownIpc();
+    clearWatchdog();
     releaseLock();
     await stopSlack();
     throw err;
@@ -151,15 +194,16 @@ setActivate(async () => {
 
 setDeactivate(async () => {
   log('deactivating');
-  if (watchdogInterval) {
-    clearInterval(watchdogInterval);
-    watchdogInterval = null;
-  }
+  try {
+    await postThreaded({ text: 'Session disconnected.' });
+  } catch {}
+  await teardownIpc();
+  clearWatchdog();
   saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
   releaseLock();
   await stopSlack();
   setSlackBridge(null!);
-  setChannelActive(false);
+  setMode('dormant');
   log('channel deactivated');
 });
 
@@ -167,23 +211,34 @@ setDeactivate(async () => {
 // Graceful shutdown
 // ---------------------------------------------------------------------------
 
-export function shutdownGracefully(): void {
+export function shutdownGracefully(reason?: string): void {
+  log(
+    `shutdownGracefully called (reason=${reason ?? 'unknown'}, ppid=${getPpid()})`,
+  );
   // Idempotent: racing SIGTERM + SIGINT + stdin-close must not double-release
   if (shuttingDown) return;
   shuttingDown = true;
 
-  // Clear the watchdog interval so it stops firing during/after shutdown.
-  if (watchdogInterval) {
-    clearInterval(watchdogInterval);
-    watchdogInterval = null;
+  // Best-effort farewell message — fire-and-forget so it doesn't block
+  // the synchronous shutdown path.
+  if (isConnected()) {
+    postThreaded({ text: 'Session ended unexpectedly.' }).catch(() => {});
   }
+
+  // Best-effort IPC server teardown — fire-and-forget close (broadcasts
+  // shutdown, closes sockets, unlinks socket file). Don't await or let it
+  // block the synchronous shutdown path.
+  teardownIpc().catch(() => {});
+
+  // Clear the watchdog interval so it stops firing during/after shutdown.
+  clearWatchdog();
 
   // Safety net: if stopSlack() hangs, force-exit after 3 s.
   // .unref() prevents this timer from keeping the event loop alive on its own.
   const forceExitTimer = setTimeout(() => process.exit(1), 3000);
   forceExitTimer.unref();
 
-  if (isChannelActive())
+  if (isConnected())
     saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
   releaseLock();
   stopSlack().finally(() => {
@@ -193,9 +248,9 @@ export function shutdownGracefully(): void {
 }
 
 if (import.meta.main) {
-  process.on('SIGINT', shutdownGracefully);
-  process.on('SIGTERM', shutdownGracefully);
-  process.stdin.on('close', shutdownGracefully);
+  process.on('SIGINT', () => shutdownGracefully('SIGINT'));
+  process.on('SIGTERM', () => shutdownGracefully('SIGTERM'));
+  process.stdin.on('close', () => shutdownGracefully('stdin-close'));
 
   // ---------------------------------------------------------------------------
   // Connect MCP transport

@@ -459,7 +459,7 @@ describe('IPCServer', () => {
     // Send a message via the low-level send method to exercise server handling
     const ackPromise = new Promise<any>((resolve) => {
       // Override onMessage to capture the ack
-      client['opts'].onMessage = (msg) => {
+      client.opts.onMessage = (msg) => {
         if (msg.type === 'send_ack') resolve(msg);
       };
     });
@@ -1074,19 +1074,26 @@ describe('IPCServer client disconnect cleanup', () => {
     expect(server.permRouting.has('req-b')).toBe(false);
   });
 
-  test('client disconnect posts "session disconnected" in client thread', async () => {
+  test('unexpected disconnect posts "session disconnected" in client thread', async () => {
     await server.start();
     const threadTs = 'client-thread-ts';
     posterMock.mockResolvedValueOnce(threadTs);
 
-    const client = new IPCClient({
-      socketPath: sockPath,
+    // Use a raw socket to register without sending unregister on close
+    const net = await import('node:net');
+    const rawSocket = net.createConnection({ path: sockPath });
+    await new Promise<void>((resolve) => rawSocket.once('connect', resolve));
+    const registerMsg = `${JSON.stringify({
+      type: 'register',
       sessionId: 'sess-1',
       label: 'test',
-    });
-    await client.connect();
+      ppid: process.pid,
+    })}\n`;
+    rawSocket.write(registerMsg);
+    await delay(200);
 
-    client.close();
+    // Destroy without sending unregister — unexpected disconnect
+    rawSocket.destroy();
     await delay(200);
 
     // The poster should have been called for register + disconnect message
@@ -1098,16 +1105,22 @@ describe('IPCServer client disconnect cleanup', () => {
     expect(disconnectCall).toBeDefined();
   });
 
-  test('client disconnect updates pending perm messages with "session disconnected"', async () => {
+  test('unexpected disconnect updates pending perm messages with "session disconnected"', async () => {
     await server.start();
     posterMock.mockResolvedValueOnce('ts-1');
 
-    const client = new IPCClient({
-      socketPath: sockPath,
+    // Use a raw socket to register without sending unregister on close
+    const net = await import('node:net');
+    const rawSocket = net.createConnection({ path: sockPath });
+    await new Promise<void>((resolve) => rawSocket.once('connect', resolve));
+    const registerMsg = `${JSON.stringify({
+      type: 'register',
       sessionId: 'sess-1',
       label: 'test',
-    });
-    await client.connect();
+      ppid: process.pid,
+    })}\n`;
+    rawSocket.write(registerMsg);
+    await delay(200);
 
     // Add a permRouting entry with a Slack message ts
     server.permRouting.set('req-perm', {
@@ -1119,7 +1132,8 @@ describe('IPCServer client disconnect cleanup', () => {
       inputPreview: 'npm test',
     });
 
-    client.close();
+    // Destroy without sending unregister — unexpected disconnect
+    rawSocket.destroy();
     await delay(200);
 
     // messageUpdater should have been called to update the perm message
@@ -1129,6 +1143,65 @@ describe('IPCServer client disconnect cleanup', () => {
     expect(ts).toBe('perm-slack-ts');
     expect(text).toContain('disconnected');
     expect(blocks).toEqual([]);
+  });
+
+  test('unregister then close: server skips farewell poster call', async () => {
+    await server.start();
+    const threadTs = 'client-thread-ts';
+    posterMock.mockResolvedValueOnce(threadTs);
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test',
+    });
+    await client.connect();
+
+    // Intentional close — sends unregister before closing
+    client.close();
+    await delay(200);
+
+    // poster should have been called once (for register/thread creation), but NOT for farewell
+    const calls = posterMock.mock.calls;
+    const farewellCall = calls.find(
+      (c: any) =>
+        c[0]?.text?.includes('disconnected') && c[0]?.thread_ts === threadTs,
+    );
+    expect(farewellCall).toBeUndefined();
+  });
+
+  test('socket close without unregister: server DOES call poster for farewell', async () => {
+    await server.start();
+    const threadTs = 'client-thread-ts-2';
+    posterMock.mockResolvedValueOnce(threadTs);
+
+    // Use a raw socket to connect and register without sending unregister
+    const net = await import('node:net');
+    const rawSocket = net.createConnection({ path: sockPath });
+    await new Promise<void>((resolve) => rawSocket.once('connect', resolve));
+
+    // Send a register message manually (no IPCClient so we control the socket)
+    const registerMsg = `${JSON.stringify({
+      type: 'register',
+      sessionId: 'sess-raw',
+      label: 'raw-test',
+      ppid: process.pid,
+    })}\n`;
+    rawSocket.write(registerMsg);
+    // Wait for register ack and thread creation
+    await delay(300);
+
+    // Close without sending unregister
+    rawSocket.destroy();
+    await delay(200);
+
+    // poster should have been called for farewell
+    const calls = posterMock.mock.calls;
+    const farewellCall = calls.find(
+      (c: any) =>
+        c[0]?.text?.includes('disconnected') && c[0]?.thread_ts === threadTs,
+    );
+    expect(farewellCall).toBeDefined();
   });
 });
 

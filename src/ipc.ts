@@ -262,6 +262,7 @@ export interface ClientEntry {
 interface SocketContext {
   lineBuffer: LineBuffer;
   sessionId?: string;
+  intentionalClose?: boolean;
 }
 
 /** Entry in the permission routing map — tracks pending perm requests from clients */
@@ -389,6 +390,8 @@ export class IPCServer {
         this.handlePermRequest(socket, msg as PermRequestMessage).catch((err) =>
           log(`perm_request handler error: ${err}`),
         );
+      } else if (msg.type === 'unregister') {
+        socket.data.intentionalClose = true;
       }
     }
   }
@@ -594,6 +597,8 @@ export class IPCServer {
     const sessionId = socket.data?.sessionId;
     if (!sessionId) return;
 
+    const intentional = socket.data?.intentionalClose === true;
+
     const client = this.clients.get(sessionId);
     this.clients.delete(sessionId);
 
@@ -607,8 +612,8 @@ export class IPCServer {
     for (const reqId of toRemove) {
       const entry = this.permRouting.get(reqId)!;
       this.permRouting.delete(reqId);
-      // Update pending Slack perm messages (best-effort)
-      if (entry.slackTs) {
+      // Update pending Slack perm messages (best-effort) — skip on intentional close
+      if (!intentional && entry.slackTs) {
         this.opts
           .messageUpdater(
             this.opts.channelId,
@@ -620,8 +625,8 @@ export class IPCServer {
       }
     }
 
-    // Post "session disconnected" in the client's thread (best-effort)
-    if (client?.threadTs) {
+    // Post "session disconnected" in the client's thread (best-effort) — skip on intentional close
+    if (!intentional && client?.threadTs) {
       this.opts
         .poster({
           text: '\u26a0\ufe0f Session disconnected.',

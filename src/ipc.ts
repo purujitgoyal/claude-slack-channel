@@ -13,7 +13,7 @@
  * Schemas are defined with Zod; TypeScript types are derived via z.infer<>.
  */
 
-import { existsSync, unlinkSync } from 'node:fs';
+import { unlinkSync } from 'node:fs';
 import type { Socket as BunSocket } from 'bun';
 import { z } from 'zod';
 import { buildPermissionBlocks, formatInputPreview, log } from './config.ts';
@@ -177,7 +177,10 @@ export class LineBuffer {
     this.totalLen += chunk.length;
 
     // Combine all accumulated chunks into one buffer
-    const buf = Buffer.concat(this.chunks, this.totalLen);
+    const buf =
+      this.chunks.length === 1
+        ? this.chunks[0]
+        : Buffer.concat(this.chunks, this.totalLen);
 
     // Find the last newline — everything after it is an incomplete line
     const lastNewline = buf.lastIndexOf(0x0a); // '\n'
@@ -295,12 +298,10 @@ export class IPCServer {
     const { socketPath } = this.opts;
 
     // Clean up stale socket file
-    if (existsSync(socketPath)) {
-      try {
-        unlinkSync(socketPath);
-      } catch {
-        // If unlink fails, the listen call below will throw
-      }
+    try {
+      unlinkSync(socketPath);
+    } catch {
+      // If unlink fails, the listen call below will throw
     }
 
     this.listener = Bun.listen<SocketContext>({
@@ -574,7 +575,7 @@ export class IPCServer {
         thread_ts: client.threadTs,
       });
 
-      // Store in routing map for verdict routing (Task 8)
+      // Store in routing map for verdict routing
       this.permRouting.set(requestId, {
         sessionId,
         slackTs: slackTs ?? '',
@@ -603,14 +604,13 @@ export class IPCServer {
     this.clients.delete(sessionId);
 
     // Remove any permRouting entries for this session
-    const toRemove: string[] = [];
+    const toRemove: [string, PermRouteEntry][] = [];
     for (const [reqId, entry] of this.permRouting) {
       if (entry.sessionId === sessionId) {
-        toRemove.push(reqId);
+        toRemove.push([reqId, entry]);
       }
     }
-    for (const reqId of toRemove) {
-      const entry = this.permRouting.get(reqId)!;
+    for (const [reqId, entry] of toRemove) {
       this.permRouting.delete(reqId);
       // Update pending Slack perm messages (best-effort) — skip on intentional close
       if (!intentional && entry.slackTs) {
@@ -692,12 +692,10 @@ export class IPCServer {
 
     // Unlink socket file
     const { socketPath } = this.opts;
-    if (existsSync(socketPath)) {
-      try {
-        unlinkSync(socketPath);
-      } catch {
-        // ignore
-      }
+    try {
+      unlinkSync(socketPath);
+    } catch {
+      // ignore
     }
   }
 }
@@ -910,12 +908,11 @@ export class IPCClient {
    * Returns the Slack message `ts` from the ack.
    */
   async sendMessage(text: string): Promise<string> {
-    const requestId = crypto.randomUUID();
-    const ack = await this.request(requestId, {
+    const ack = await this.request({
       type: 'send_message',
-      requestId,
+      requestId: '',
       text,
-    });
+    } as any);
     return (ack as SendAckMessage).ts;
   }
 
@@ -924,12 +921,11 @@ export class IPCClient {
    * Returns the new thread's `threadTs` from the ack.
    */
   async newThread(text?: string): Promise<string> {
-    const requestId = crypto.randomUUID();
-    const ack = await this.request(requestId, {
+    const ack = await this.request({
       type: 'new_thread',
-      requestId,
+      requestId: '',
       text,
-    });
+    } as any);
     return (ack as NewThreadAckMessage).threadTs;
   }
 
@@ -937,13 +933,7 @@ export class IPCClient {
    * Add a reaction to a Slack message via the connected session's bridge.
    */
   async addReaction(emoji: string, eventTs: string): Promise<void> {
-    const requestId = crypto.randomUUID();
-    await this.request(requestId, {
-      type: 'react',
-      requestId,
-      emoji,
-      eventTs,
-    });
+    await this.request({ type: 'react', requestId: '', emoji, eventTs } as any);
   }
 
   /**
@@ -969,10 +959,9 @@ export class IPCClient {
    * Send a client message and wait for a matching ack (by requestId).
    * Rejects after IPC_REQUEST_TIMEOUT if no ack arrives.
    */
-  private request(
-    requestId: string,
-    msg: ClientMessage,
-  ): Promise<ServerMessage> {
+  private request(msg: ClientMessage): Promise<ServerMessage> {
+    const requestId = crypto.randomUUID();
+    (msg as any).requestId = requestId;
     return new Promise<ServerMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);

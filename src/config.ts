@@ -156,7 +156,7 @@ export function getSessionLabel(): string {
 }
 
 export function ensureChannelsDir(): void {
-  if (!existsSync(CHANNELS_DIR)) mkdirSync(CHANNELS_DIR, { recursive: true });
+  mkdirSync(CHANNELS_DIR, { recursive: true });
 }
 
 export function loadEnv(path: string): Record<string, string> {

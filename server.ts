@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ENV_PATH, loadEnv, log, SOCKET_PATH } from './src/config.ts';
-import type { IPCServer } from './src/ipc.ts';
+import { type IPCServer, setActiveServer } from './src/ipc.ts';
 import { LockHeldError, releaseLock, tryAcquireLock } from './src/lock.ts';
 import {
   isConnected,
@@ -153,6 +153,7 @@ async function activate(): Promise<void> {
     });
     await server.start();
     ipcServer = server;
+    setActiveServer(server);
 
     setMode('connected');
     log(`channel activated — ${channelId}`);
@@ -163,6 +164,7 @@ async function activate(): Promise<void> {
         await ipcServer.close();
       } catch {}
       ipcServer = null;
+      setActiveServer(null);
     }
     if (watchdogInterval) {
       clearInterval(watchdogInterval);
@@ -187,6 +189,7 @@ setDeactivate(async () => {
       await ipcServer.close();
     } catch {}
     ipcServer = null;
+    setActiveServer(null);
   }
   if (watchdogInterval) {
     clearInterval(watchdogInterval);
@@ -220,6 +223,7 @@ export function shutdownGracefully(reason?: string): void {
       ipcServer.close().catch(() => {});
     } catch {}
     ipcServer = null;
+    setActiveServer(null);
   }
 
   // Clear the watchdog interval so it stops firing during/after shutdown.

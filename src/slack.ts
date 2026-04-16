@@ -1,6 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { App } from '@slack/bolt';
 import { codePreviewBlock, log, stripMentions } from './config.ts';
+import { routeVerdict } from './ipc.ts';
 import {
   getActiveThreadTs,
   getLastSeenEventTs,
@@ -297,6 +298,11 @@ function registerBoltHandlers(mcp: Server) {
   });
 
   // Permission relay — receive verdict from Allow/Deny button click
+  //
+  // Three-way routing:
+  //   1. Client perm (in IPC routing map) → send perm_response to client socket
+  //   2. Connected session's own perm (in pendingPermissions) → mcp.notification()
+  //   3. Stale button (neither map) → update message with stale text
   bolt!.action(/^(allow|deny)_.+$/, async ({ action, ack, body, client }) => {
     await ack();
 
@@ -314,50 +320,77 @@ function registerBoltHandlers(mcp: Server) {
     if (resolvedPermissions.has(request_id)) return;
     resolvedPermissions.add(request_id);
 
-    try {
-      await mcp.notification({
-        method: 'notifications/claude/channel/permission',
-        params: { request_id, behavior },
-      });
-    } catch (err) {
-      resolvedPermissions.delete(request_id);
-      log(`failed to send verdict for ${request_id}: ${err}`);
-      return;
-    }
-
-    const details = pendingPermissions.get(request_id);
-    pendingPermissions.delete(request_id);
-    log(`verdict ${behavior} for request ${request_id}`);
-
-    // Update the Slack message — replace buttons with outcome text
+    // Helper to update the Slack message with outcome text
     const message = body.message as { ts?: string } | undefined;
     const msgChannelId =
       (body.container as { channel_id?: string } | undefined)?.channel_id ??
       channelId;
 
-    const label = behavior === 'allow' ? 'Allowed' : 'Denied';
-    const preview = details?.input_preview ?? '';
-    const summaryText = details
-      ? `*${label}* — \`${details.tool_name}\``
-      : `*${label}* — request \`${request_id}\``;
-
-    if (message?.ts && msgChannelId) {
-      await client.chat.update({
-        channel: msgChannelId,
-        ts: message.ts,
-        text: summaryText,
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: summaryText,
+    const updateMessage = async (
+      summaryText: string,
+      preview: string,
+    ): Promise<void> => {
+      if (message?.ts && msgChannelId) {
+        await client.chat.update({
+          channel: msgChannelId,
+          ts: message.ts,
+          text: summaryText,
+          blocks: [
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: summaryText,
+              },
             },
-          },
-          ...codePreviewBlock(preview),
-        ],
-      });
+            ...codePreviewBlock(preview),
+          ],
+        });
+      }
+    };
+
+    // ── Path 1: Client perm (IPC routing map) ──
+    const routeResult = routeVerdict(request_id, behavior);
+    if (routeResult.routed) {
+      const { toolName, inputPreview } = routeResult.details;
+      const label = behavior === 'allow' ? 'Allowed' : 'Denied';
+      const summaryText = `*${label}* — \`${toolName}\``;
+      log(`verdict ${behavior} for client request ${request_id}`);
+      await updateMessage(summaryText, inputPreview);
+      return;
     }
+
+    // ── Path 2: Connected session's own perm ──
+    if (pendingPermissions.has(request_id)) {
+      try {
+        await mcp.notification({
+          method: 'notifications/claude/channel/permission',
+          params: { request_id, behavior },
+        });
+      } catch (err) {
+        resolvedPermissions.delete(request_id);
+        log(`failed to send verdict for ${request_id}: ${err}`);
+        return;
+      }
+
+      const details = pendingPermissions.get(request_id);
+      pendingPermissions.delete(request_id);
+      log(`verdict ${behavior} for request ${request_id}`);
+
+      const label = behavior === 'allow' ? 'Allowed' : 'Denied';
+      const preview = details?.input_preview ?? '';
+      const summaryText = details
+        ? `*${label}* — \`${details.tool_name}\``
+        : `*${label}* — request \`${request_id}\``;
+      await updateMessage(summaryText, preview);
+      return;
+    }
+
+    // ── Path 3: Stale button (neither map) ──
+    log(`stale verdict ${behavior} for unknown request ${request_id}`);
+    const staleText =
+      'Stale request from a previous session — ignore or approve at the terminal if still needed.';
+    await updateMessage(staleText, '');
   });
 }
 

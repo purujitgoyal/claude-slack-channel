@@ -632,6 +632,57 @@ export class IPCServer {
   }
 }
 
+// ── Verdict Routing ──────────────────────────────────────────────────
+
+/** Module-level reference to the active IPCServer (avoids circular deps). */
+let activeServer: IPCServer | null = null;
+
+/** Set (or clear) the active IPCServer instance for verdict routing. */
+export function setActiveServer(s: IPCServer | null): void {
+  activeServer = s;
+}
+
+/**
+ * Route a permission verdict to the correct IPC client session.
+ *
+ * If the requestId is found in the server's permRouting map, the verdict is
+ * sent to the client via its socket and details are returned. Otherwise,
+ * `{ routed: false }` is returned so the caller can fall through to the
+ * connected-session path.
+ */
+export function routeVerdict(
+  requestId: string,
+  behavior: string,
+):
+  | {
+      routed: true;
+      details: { toolName: string; description: string; inputPreview: string };
+    }
+  | { routed: false } {
+  if (!activeServer) return { routed: false };
+
+  const entry = activeServer.permRouting.get(requestId);
+  if (!entry) return { routed: false };
+
+  // Send perm_response to the client's socket
+  const resp: PermResponseMessage = {
+    type: 'perm_response',
+    requestId,
+    behavior,
+  };
+  activeServer.sendTo(entry.sessionId, resp);
+
+  // Extract details before removing
+  const details = {
+    toolName: entry.toolName,
+    description: entry.description,
+    inputPreview: entry.inputPreview,
+  };
+
+  activeServer.permRouting.delete(requestId);
+  return { routed: true, details };
+}
+
 // ── IPCClient ──────────────────────────────────────────────────────────
 
 /** Options for constructing an IPCClient */

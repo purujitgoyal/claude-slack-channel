@@ -10,7 +10,14 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import type { IPCMessage, ServerMessage } from '../src/ipc';
-import { encode, IPCClient, IPCServer, LineBuffer } from '../src/ipc';
+import {
+  encode,
+  IPCClient,
+  IPCServer,
+  LineBuffer,
+  routeVerdict,
+  setActiveServer,
+} from '../src/ipc';
 
 describe('encode', () => {
   test('returns JSON string terminated with newline', () => {
@@ -879,5 +886,154 @@ describe('IPCClient', () => {
     client.close();
 
     await expect(sendPromise).rejects.toThrow();
+  });
+});
+
+// ── routeVerdict Tests ──────────────────────────────────────────────────
+
+describe('routeVerdict', () => {
+  let server: IPCServer;
+  let sockPath: string;
+  let posterMock: ReturnType<typeof mock>;
+  let messageUpdaterMock: ReturnType<typeof mock>;
+  let reacterMock: ReturnType<typeof mock>;
+
+  beforeEach(() => {
+    sockPath = tmpSock();
+    posterMock = mock(async () => `thread-ts-${randomUUID()}`);
+    messageUpdaterMock = mock(async () => {});
+    reacterMock = mock(async () => {});
+    server = new IPCServer({
+      socketPath: sockPath,
+      poster: posterMock as any,
+      messageUpdater: messageUpdaterMock as any,
+      reacter: reacterMock as any,
+      channelId: 'C-test',
+    });
+    setActiveServer(server);
+  });
+
+  afterEach(async () => {
+    setActiveServer(null);
+    try {
+      await server.close();
+    } catch {
+      // already closed
+    }
+    try {
+      if (existsSync(sockPath)) unlinkSync(sockPath);
+    } catch {
+      // ignore
+    }
+  });
+
+  test('returns { routed: false } when no active server', () => {
+    setActiveServer(null);
+    const result = routeVerdict('req-1', 'allow');
+    expect(result.routed).toBe(false);
+  });
+
+  test('returns { routed: false } for unknown requestId', () => {
+    const result = routeVerdict('unknown-req', 'deny');
+    expect(result.routed).toBe(false);
+  });
+
+  test('returns { routed: true, details } when requestId is in routing map', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1');
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'sess-1',
+      label: 'test-session',
+    });
+    await client.connect();
+
+    // Manually add a permRouting entry (simulating handlePermRequest)
+    server.permRouting.set('req-1', {
+      sessionId: 'sess-1',
+      slackTs: '5000.0001',
+      timestamp: Date.now(),
+      toolName: 'Bash',
+      description: 'Run a command',
+      inputPreview: 'git status',
+    });
+
+    const result = routeVerdict('req-1', 'allow');
+    expect(result.routed).toBe(true);
+    if (result.routed) {
+      expect(result.details.toolName).toBe('Bash');
+      expect(result.details.description).toBe('Run a command');
+      expect(result.details.inputPreview).toBe('git status');
+    }
+
+    client.close();
+  });
+
+  test('sends perm_response to the client socket', async () => {
+    await server.start();
+    posterMock.mockResolvedValueOnce('ts-1');
+
+    const permResponseReceived = new Promise<any>((resolve) => {
+      const c = new IPCClient({
+        socketPath: sockPath,
+        sessionId: 'sess-1',
+        label: 'test-session',
+        onPermResponse: (requestId, behavior) =>
+          resolve({ requestId, behavior }),
+      });
+      c.connect();
+    });
+
+    await delay(100);
+
+    server.permRouting.set('req-1', {
+      sessionId: 'sess-1',
+      slackTs: '5000.0001',
+      timestamp: Date.now(),
+      toolName: 'Bash',
+      description: 'Run a command',
+      inputPreview: 'git status',
+    });
+
+    routeVerdict('req-1', 'allow');
+
+    const resp = await Promise.race([
+      permResponseReceived,
+      delay(2000).then(() => null),
+    ]);
+    expect(resp).not.toBeNull();
+    expect(resp.requestId).toBe('req-1');
+    expect(resp.behavior).toBe('allow');
+  });
+
+  test('removes entry from permRouting after routing', () => {
+    server.permRouting.set('req-1', {
+      sessionId: 'sess-1',
+      slackTs: '5000.0001',
+      timestamp: Date.now(),
+      toolName: 'Bash',
+      description: 'Run a command',
+      inputPreview: 'git status',
+    });
+
+    routeVerdict('req-1', 'deny');
+    expect(server.permRouting.has('req-1')).toBe(false);
+  });
+
+  test('returns { routed: false } for evicted (expired) entry', () => {
+    // Entry was set then removed (simulating TTL eviction)
+    server.permRouting.set('req-expired', {
+      sessionId: 'sess-1',
+      slackTs: '5000.0001',
+      timestamp: Date.now() - 600_000, // 10 min ago
+      toolName: 'Bash',
+      description: 'Run a command',
+      inputPreview: 'git status',
+    });
+    server.permRouting.delete('req-expired'); // simulate eviction
+
+    const result = routeVerdict('req-expired', 'allow');
+    expect(result.routed).toBe(false);
   });
 });

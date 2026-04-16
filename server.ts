@@ -3,11 +3,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ENV_PATH, loadEnv, log } from './src/config.ts';
 import { acquireLock, releaseLock } from './src/lock.ts';
 import {
-  isChannelActive,
+  isConnected,
   mcp,
   setActivate,
-  setChannelActive,
   setDeactivate,
+  setMode,
   setSlackBridge,
 } from './src/mcp.ts';
 import {
@@ -64,7 +64,7 @@ let watchdogInterval: ReturnType<typeof setInterval> | null = null;
 export function startWatchdog(): void {
   watchdogInterval = setInterval(() => {
     if (getPpid() === 1) {
-      shutdownGracefully();
+      shutdownGracefully('watchdog-orphan');
     }
   }, 5000);
   watchdogInterval.unref();
@@ -117,7 +117,7 @@ async function activate(): Promise<void> {
       appToken,
       channelId,
       allowedUserId,
-      onDead: shutdownGracefully,
+      onDead: () => shutdownGracefully('slack-dead'),
     });
 
     setSlackBridge({
@@ -129,7 +129,7 @@ async function activate(): Promise<void> {
       channelId,
     });
 
-    setChannelActive(true);
+    setMode('connected');
     log(`channel activated — ${channelId}`);
   } catch (err) {
     log(`activation failed: ${err}`);
@@ -159,7 +159,7 @@ setDeactivate(async () => {
   releaseLock();
   await stopSlack();
   setSlackBridge(null!);
-  setChannelActive(false);
+  setMode('dormant');
   log('channel deactivated');
 });
 
@@ -167,7 +167,10 @@ setDeactivate(async () => {
 // Graceful shutdown
 // ---------------------------------------------------------------------------
 
-export function shutdownGracefully(): void {
+export function shutdownGracefully(reason?: string): void {
+  log(
+    `shutdownGracefully called (reason=${reason ?? 'unknown'}, ppid=${getPpid()})`,
+  );
   // Idempotent: racing SIGTERM + SIGINT + stdin-close must not double-release
   if (shuttingDown) return;
   shuttingDown = true;
@@ -183,7 +186,7 @@ export function shutdownGracefully(): void {
   const forceExitTimer = setTimeout(() => process.exit(1), 3000);
   forceExitTimer.unref();
 
-  if (isChannelActive())
+  if (isConnected())
     saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
   releaseLock();
   stopSlack().finally(() => {
@@ -193,9 +196,9 @@ export function shutdownGracefully(): void {
 }
 
 if (import.meta.main) {
-  process.on('SIGINT', shutdownGracefully);
-  process.on('SIGTERM', shutdownGracefully);
-  process.stdin.on('close', shutdownGracefully);
+  process.on('SIGINT', () => shutdownGracefully('SIGINT'));
+  process.on('SIGTERM', () => shutdownGracefully('SIGTERM'));
+  process.stdin.on('close', () => shutdownGracefully('stdin-close'));
 
   // ---------------------------------------------------------------------------
   // Connect MCP transport

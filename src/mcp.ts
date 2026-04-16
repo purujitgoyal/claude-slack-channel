@@ -42,17 +42,27 @@ function requireBridge(): SlackBridge {
 }
 
 // ---------------------------------------------------------------------------
-// Channel active flag
+// Session mode: dormant → connected (owns Slack bridge) or client (IPC relay)
 // ---------------------------------------------------------------------------
 
-let channelActive = false;
+export type Mode = 'dormant' | 'connected' | 'client';
 
-export function setChannelActive(active: boolean): void {
-  channelActive = active;
+let mode: Mode = 'dormant';
+
+export function getMode(): Mode {
+  return mode;
 }
 
-export function isChannelActive(): boolean {
-  return channelActive;
+export function setMode(m: Mode): void {
+  mode = m;
+}
+
+export function isConnected(): boolean {
+  return mode === 'connected';
+}
+
+export function isClient(): boolean {
+  return mode === 'client';
 }
 
 // ---------------------------------------------------------------------------
@@ -217,14 +227,14 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'connect') {
-    if (channelActive) return textResult('Already connected.');
+    if (getMode() !== 'dormant') return textResult('Already connected.');
     if (!injectedActivate) throw new Error('activate function not set');
     await injectedActivate();
     return textResult('Connected to Slack.');
   }
 
   if (req.params.name === 'disconnect') {
-    if (!channelActive) return textResult('Not connected.');
+    if (getMode() === 'dormant') return textResult('Not connected.');
     if (!injectedDeactivate) throw new Error('deactivate function not set');
     await injectedDeactivate();
     return textResult(
@@ -232,7 +242,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     );
   }
 
-  if (!channelActive)
+  if (getMode() === 'dormant')
     throw new Error('slack channel is not active — call connect first');
   const b = requireBridge();
 

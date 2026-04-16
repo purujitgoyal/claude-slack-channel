@@ -93,7 +93,7 @@ const {
   setGetPpid,
   resetWatchdog,
 } = await import('../server');
-const { mcp, setChannelActive } = await import('../src/mcp');
+const { mcp, setMode } = await import('../src/mcp');
 const { setLastSeenEventTs } = await import('../src/session');
 
 // ---------------------------------------------------------------------------
@@ -942,7 +942,7 @@ describe('connect tool', () => {
   const listTools = (mcp as any)._requestHandlers?.get('tools/list');
 
   test('always lists all tools including connect', async () => {
-    setChannelActive(false);
+    setMode('dormant');
     const result = await listTools({ method: 'tools/list', params: {} });
     const names = result.tools.map((t: any) => t.name);
     expect(names).toContain('connect');

@@ -802,6 +802,12 @@ export interface IPCClientOptions {
   label: string;
   onMessage?: (msg: ServerMessage) => void;
   onPermResponse?: (requestId: string, behavior: string) => void;
+  onInboundMessage?: (
+    text: string,
+    eventTs: string,
+    userId: string,
+    channelId: string,
+  ) => void;
   onDisconnect?: (info: { graceful: boolean }) => void;
   connectTimeoutMs?: number;
 }
@@ -893,6 +899,17 @@ export class IPCClient {
               if (msg.type === 'perm_response') {
                 const pr = msg as PermResponseMessage;
                 this.opts.onPermResponse?.(pr.requestId, pr.behavior);
+              }
+
+              // Dispatch inbound_message to dedicated callback
+              if (msg.type === 'inbound_message') {
+                const im = msg as InboundMessage;
+                this.opts.onInboundMessage?.(
+                  im.text,
+                  im.eventTs,
+                  im.userId,
+                  im.channelId,
+                );
               }
 
               // Dispatch to onMessage callback

@@ -1996,3 +1996,69 @@ describe('findClientByThread', () => {
     expect(server.findClientByThread('9.999')).toBeNull();
   });
 });
+
+// ── IPCClient onInboundMessage Tests ─────────────────────────────────────────
+
+describe('IPCClient onInboundMessage', () => {
+  const sockPath = `/tmp/test-inbound-${randomUUID()}.sock`;
+  let server: IPCServer;
+  let posterMock: ReturnType<typeof mock>;
+
+  beforeEach(async () => {
+    posterMock = mock(async () => 'ts-1');
+    server = new IPCServer({
+      socketPath: sockPath,
+      poster: posterMock as any,
+      messageUpdater: async () => {},
+    });
+    setActiveServer(server);
+    await server.start();
+  });
+
+  afterEach(async () => {
+    await server.close();
+    if (existsSync(sockPath)) unlinkSync(sockPath);
+  });
+
+  test('onInboundMessage fires with exact fields when server sends inbound_message', async () => {
+    const inboundReceived = new Promise<{
+      text: string;
+      eventTs: string;
+      userId: string;
+      channelId: string;
+    }>((resolve) => {
+      const client = new IPCClient({
+        socketPath: sockPath,
+        sessionId: 'inbound-sess-1',
+        label: 'inbound-test',
+        onInboundMessage: (text, eventTs, userId, channelId) =>
+          resolve({ text, eventTs, userId, channelId }),
+      });
+      client.connect();
+    });
+
+    // Wait for client to register
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Server sends an inbound_message directly to the client
+    const msg = {
+      type: 'inbound_message' as const,
+      text: 'hello from slack',
+      eventTs: '1234567890.123456',
+      userId: 'U0123ABC',
+      channelId: 'C0456DEF',
+    };
+    server.sendTo('inbound-sess-1', msg as any);
+
+    const got = await Promise.race([
+      inboundReceived,
+      new Promise<null>((r) => setTimeout(() => r(null), 2000)),
+    ]);
+
+    expect(got).not.toBeNull();
+    expect(got!.text).toBe('hello from slack');
+    expect(got!.eventTs).toBe('1234567890.123456');
+    expect(got!.userId).toBe('U0123ABC');
+    expect(got!.channelId).toBe('C0456DEF');
+  });
+});

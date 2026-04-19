@@ -675,4 +675,70 @@ describe('recoverMissedMessages — client-thread recovery', () => {
 
     expect(result.recovered).toBe(2);
   });
+
+  // =========================================================================
+  // Guard test: listClientThreads wired but forwardToClient/evictClient missing
+  // → gracefully fall back to old_thread_reply on primary (no TypeError thrown)
+  // =========================================================================
+
+  test('falls back gracefully when listClientThreads is wired but forwardToClient/evictClient are not', async () => {
+    // Restart with ONLY listClientThreads wired — no forwardToClient, no evictClient
+    await stopSlack();
+    resetIpcCallbacks();
+    mcpMock = { notification: mock(async () => {}) };
+    await startSlack({
+      mcp: mcpMock as any,
+      botToken: TEST_BOT_TOKEN,
+      appToken: TEST_APP_TOKEN,
+      channelId: TEST_CHANNEL_ID,
+      allowedUserId: TEST_ALLOWED_USER,
+      onDead: () => {},
+      listClientThreads: listClientThreadsMock as any,
+      // forwardToClient and evictClient intentionally omitted
+    });
+    setActiveThreadTs(TEST_PRIMARY_THREAD);
+    setLastSeenEventTs(null);
+    mcpMock.notification.mockClear();
+
+    const clientReplyTs = '1775644620.400000';
+
+    historyMock.mockResolvedValue({ ok: true, messages: [] });
+    repliesMock
+      .mockResolvedValueOnce({ ok: true, messages: [] }) // primary: no replies
+      .mockResolvedValueOnce({
+        ok: true,
+        messages: [
+          {
+            user: TEST_ALLOWED_USER,
+            text: 'client parent',
+            ts: TEST_CLIENT_THREAD,
+            thread_ts: TEST_CLIENT_THREAD,
+          },
+          {
+            user: TEST_ALLOWED_USER,
+            text: 'client reply with no ipc wiring',
+            ts: clientReplyTs,
+            thread_ts: TEST_CLIENT_THREAD,
+          },
+        ],
+      });
+
+    let threw = false;
+    try {
+      await recoverMissedMessages(mcpMock as any, null);
+    } catch {
+      threw = true;
+    }
+
+    // Must not throw TypeError from non-null assertions
+    expect(threw).toBe(false);
+
+    // Falls back to primary old_thread_reply path
+    expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+    const notifParams = mcpMock.notification.mock.calls[0][0].params;
+    expect(notifParams.meta.event_ts).toBe(clientReplyTs);
+
+    // Cursor advanced
+    expect(getLastSeenEventTs()).toBe(clientReplyTs);
+  });
 });

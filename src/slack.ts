@@ -799,9 +799,12 @@ export async function recoverMissedMessages(
     }
   }
 
-  // Fetch replies for each connected client's thread in parallel
+  // Fetch replies for each connected client's thread in parallel.
+  // Store as wrapper objects { msg, sessionId } — avoids mutating Slack message
+  // shape (Slack adds fields over time; an in-band _clientSessionId tag would
+  // collide if Slack ever introduced such a field).
   const clientThreadEntries = listClientThreads?.() ?? [];
-  const clientRepliesTagged: Array<any & { _clientSessionId: string }> = [];
+  const clientRepliesTagged: Array<{ msg: any; sessionId: string }> = [];
   if (clientThreadEntries.length > 0) {
     const clientFetches = clientThreadEntries.map(
       async ({ sessionId, threadTs }) => {
@@ -821,7 +824,7 @@ export async function recoverMissedMessages(
               msg.ts !== threadTs,
           );
           for (const m of filtered) {
-            clientRepliesTagged.push({ ...m, _clientSessionId: sessionId });
+            clientRepliesTagged.push({ msg: m, sessionId });
           }
         } catch (err: any) {
           const msg = err?.message ?? String(err);
@@ -854,15 +857,33 @@ export async function recoverMissedMessages(
       )
     : [];
 
-  // Combine all messages (primary mentions, primary thread replies, client thread replies),
-  // drop already-seen events, sort ascending by ts
-  const all = [...mentions, ...replies, ...clientRepliesTagged];
+  // Combine all messages as a discriminated union. Primary messages (mentions +
+  // primary thread replies) are wrapped as { kind: 'primary', msg }; client thread
+  // replies are wrapped as { kind: 'client', msg, sessionId }. This keeps each
+  // message's routing origin explicit at the dispatch site.
+  type DispatchItem =
+    | { kind: 'primary'; msg: any }
+    | { kind: 'client'; msg: any; sessionId: string };
+
+  const all: DispatchItem[] = [
+    ...mentions.map((msg: any): DispatchItem => ({ kind: 'primary', msg })),
+    ...replies.map((msg: any): DispatchItem => ({ kind: 'primary', msg })),
+    ...clientRepliesTagged.map(
+      ({ msg, sessionId }): DispatchItem => ({
+        kind: 'client',
+        msg,
+        sessionId,
+      }),
+    ),
+  ];
+
+  // Drop already-seen events, sort ascending by ts
   const unseen = sinceTs
-    ? all.filter((msg: any) => (msg.ts ?? '') > sinceTs)
+    ? all.filter((item) => (item.msg.ts ?? '') > sinceTs)
     : all;
-  unseen.sort((a: any, b: any) => {
-    const ta: string = a.ts ?? '';
-    const tb: string = b.ts ?? '';
+  unseen.sort((a, b) => {
+    const ta: string = a.msg.ts ?? '';
+    const tb: string = b.msg.ts ?? '';
     if (ta < tb) return -1;
     if (ta > tb) return 1;
     return 0;
@@ -870,7 +891,8 @@ export async function recoverMissedMessages(
 
   let recoveredCount = 0;
 
-  for (const msg of unseen) {
+  for (const item of unseen) {
+    const msg = item.msg;
     const ts: string = msg.ts ?? '';
     const text: string = msg.text ?? '';
     const userId: string = msg.user ?? '';
@@ -879,9 +901,25 @@ export async function recoverMissedMessages(
     if (botUserId && userId === botUserId) continue;
 
     try {
-      if (msg._clientSessionId) {
+      if (item.kind === 'client') {
+        const sessionId = item.sessionId;
+
+        // Graceful degradation: if IPC callbacks aren't wired, treat the client
+        // as dead and fall back to old_thread_reply on primary.
+        if (!forwardToClient || !evictClient) {
+          await forwardInboundMessage(mcp, {
+            type: 'old_thread_reply',
+            text,
+            eventTs: ts,
+            userId,
+            oldThreadTs: msg.thread_ts ?? ts,
+          });
+          setLastSeenEventTs(ts);
+          recoveredCount++;
+          continue;
+        }
+
         // Client-thread reply — route to the owning IPC client
-        const sessionId: string = msg._clientSessionId;
         const envelope: IpcInboundMessage = {
           type: 'inbound_message',
           text,
@@ -891,7 +929,7 @@ export async function recoverMissedMessages(
         };
         let delivered = false;
         try {
-          delivered = forwardToClient!(sessionId, envelope);
+          delivered = forwardToClient(sessionId, envelope);
         } catch {
           delivered = false;
         }
@@ -900,7 +938,7 @@ export async function recoverMissedMessages(
           recoveredCount++;
         } else {
           // Client socket is dead — evict and fall back to old_thread_reply
-          evictClient!(sessionId);
+          evictClient(sessionId);
           await forwardInboundMessage(mcp, {
             type: 'old_thread_reply',
             text,

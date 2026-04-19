@@ -148,6 +148,13 @@ async function activate(): Promise<void> {
       channelId,
       allowedUserId,
       onDead: () => shutdownGracefully('slack-dead'),
+      findClientByThread: (ts) => ipcServer?.findClientByThread(ts) ?? null,
+      evictClient: (sessionId) =>
+        ipcServer?.evictClient(sessionId, {
+          intentional: false,
+          postNotice: true,
+        }),
+      forwardToClient: (sid, msg) => ipcServer?.sendTo(sid, msg) ?? false,
     });
 
     const addReaction = (ch: string, name: string, ts: string) =>

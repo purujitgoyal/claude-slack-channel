@@ -996,6 +996,41 @@ describe('Bolt Handlers', () => {
   });
 
   // =========================================================================
+  // IPC callbacks wiring
+  // =========================================================================
+
+  describe('startSlack IPC callback opts', () => {
+    test('accepts findClientByThread, evictClient, forwardToClient in opts', async () => {
+      await stopSlack();
+      resetBotUserId();
+
+      const findClientByThread = mock((ts: string): string | null => null);
+      const evictClient = mock((sessionId: string): void => {});
+      const forwardToClient = mock(
+        (sessionId: string, msg: any): boolean => false,
+      );
+
+      // Should not throw — these opts must be accepted by the type and assigned
+      await startSlack({
+        mcp: mcpMock as any,
+        botToken: TEST_BOT_TOKEN,
+        appToken: TEST_APP_TOKEN,
+        channelId: TEST_CHANNEL_ID,
+        allowedUserId: TEST_ALLOWED_USER,
+        onDead: () => {},
+        findClientByThread,
+        evictClient,
+        forwardToClient,
+      });
+
+      // Callbacks are accepted and stored — no errors thrown above
+      expect(findClientByThread).not.toHaveBeenCalled();
+      expect(evictClient).not.toHaveBeenCalled();
+      expect(forwardToClient).not.toHaveBeenCalled();
+    });
+  });
+
+  // =========================================================================
   // Bot User ID Capture
   // =========================================================================
 

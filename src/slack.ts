@@ -1,6 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { App } from '@slack/bolt';
 import { codePreviewBlock, log, stripMentions } from './config.ts';
+import type { InboundMessage as IpcInboundMessage } from './ipc.ts';
 import { routeVerdict } from './ipc.ts';
 import {
   getActiveThreadTs,
@@ -19,6 +20,11 @@ import {
 let bolt: App | null = null;
 let channelId = '';
 let allowedUserId = '';
+let findClientByThread: ((ts: string) => string | null) | null = null;
+let evictClient: ((sessionId: string) => void) | null = null;
+let forwardToClient:
+  | ((sessionId: string, msg: IpcInboundMessage) => boolean)
+  | null = null;
 let cleanupMonitor: (() => void) | null = null;
 let botUserId: string | null = null;
 
@@ -651,9 +657,15 @@ export async function startSlack(opts: {
   channelId: string;
   allowedUserId: string;
   onDead: () => void;
+  findClientByThread?: (ts: string) => string | null;
+  evictClient?: (sessionId: string) => void;
+  forwardToClient?: (sessionId: string, msg: IpcInboundMessage) => boolean;
 }): Promise<App> {
   channelId = opts.channelId;
   allowedUserId = opts.allowedUserId;
+  findClientByThread = opts.findClientByThread ?? null;
+  evictClient = opts.evictClient ?? null;
+  forwardToClient = opts.forwardToClient ?? null;
 
   bolt = new App({
     token: opts.botToken,

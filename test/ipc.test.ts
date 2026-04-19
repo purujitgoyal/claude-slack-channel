@@ -2021,44 +2021,47 @@ describe('IPCClient onInboundMessage', () => {
   });
 
   test('onInboundMessage fires with exact fields when server sends inbound_message', async () => {
+    let resolveInbound: (v: {
+      text: string;
+      eventTs: string;
+      userId: string;
+      channelId: string;
+    }) => void;
     const inboundReceived = new Promise<{
       text: string;
       eventTs: string;
       userId: string;
       channelId: string;
     }>((resolve) => {
-      const client = new IPCClient({
-        socketPath: sockPath,
-        sessionId: 'inbound-sess-1',
-        label: 'inbound-test',
-        onInboundMessage: (text, eventTs, userId, channelId) =>
-          resolve({ text, eventTs, userId, channelId }),
-      });
-      client.connect();
+      resolveInbound = resolve;
     });
 
-    // Wait for client to register
-    await new Promise((r) => setTimeout(r, 100));
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'inbound-sess-1',
+      label: 'inbound-test',
+      onInboundMessage: (text, eventTs, userId, channelId) =>
+        resolveInbound({ text, eventTs, userId, channelId }),
+    });
+
+    // connect() resolves on register_ack — proper readiness signal
+    await client.connect();
 
     // Server sends an inbound_message directly to the client
-    const msg = {
-      type: 'inbound_message' as const,
+    const msg: ServerMessage = {
+      type: 'inbound_message',
       text: 'hello from slack',
       eventTs: '1234567890.123456',
       userId: 'U0123ABC',
       channelId: 'C0456DEF',
     };
-    server.sendTo('inbound-sess-1', msg as any);
+    server.sendTo('inbound-sess-1', msg);
 
-    const got = await Promise.race([
-      inboundReceived,
-      new Promise<null>((r) => setTimeout(() => r(null), 2000)),
-    ]);
+    const got = await inboundReceived;
 
-    expect(got).not.toBeNull();
-    expect(got!.text).toBe('hello from slack');
-    expect(got!.eventTs).toBe('1234567890.123456');
-    expect(got!.userId).toBe('U0123ABC');
-    expect(got!.channelId).toBe('C0456DEF');
+    expect(got.text).toBe('hello from slack');
+    expect(got.eventTs).toBe('1234567890.123456');
+    expect(got.userId).toBe('U0123ABC');
+    expect(got.channelId).toBe('C0456DEF');
   });
 });

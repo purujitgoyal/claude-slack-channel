@@ -287,7 +287,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
                     },
                   },
                 })
-                .catch(() => {});
+                .catch((err) =>
+                  log(`failed to forward inbound message via MCP: ${err}`),
+                );
             },
             onDisconnect: ({ graceful }) => {
               ipcClient = null;

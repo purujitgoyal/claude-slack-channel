@@ -1038,6 +1038,207 @@ describe('Bolt Handlers', () => {
   });
 
   // =========================================================================
+  // Client-thread inbound routing (Task 7)
+  // =========================================================================
+
+  describe('client thread reply routing', () => {
+    // Helper: restart startSlack with IPC callbacks wired
+    async function startSlackWithIpc(opts: {
+      findClientByThread: (ts: string) => string | null;
+      evictClient: (sessionId: string) => void;
+      forwardToClient: (sessionId: string, msg: any) => boolean;
+    }) {
+      await stopSlack();
+      resetBotUserId();
+      await startSlack({
+        mcp: mcpMock as any,
+        botToken: TEST_BOT_TOKEN,
+        appToken: TEST_APP_TOKEN,
+        channelId: TEST_CHANNEL_ID,
+        allowedUserId: TEST_ALLOWED_USER,
+        onDead: () => {},
+        findClientByThread: opts.findClientByThread,
+        evictClient: opts.evictClient,
+        forwardToClient: opts.forwardToClient,
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 1: happy path — client receives the message
+    // -----------------------------------------------------------------------
+
+    test('forwards message to connected client (happy path)', async () => {
+      const findClientByThread = mock((ts: string): string | null =>
+        ts === '1.001' ? 's1' : null,
+      );
+      const forwardToClient = mock(
+        (_sessionId: string, _msg: any): boolean => true,
+      );
+      const evictClient = mock((_sessionId: string): void => {});
+
+      await startSlackWithIpc({
+        findClientByThread,
+        evictClient,
+        forwardToClient,
+      });
+
+      setActiveThreadTs('2.002'); // different thread — so primary path NOT taken
+      setLastSeenEventTs(null);
+      mcpMock.notification.mockClear();
+
+      await simulateMessage({
+        user: TEST_ALLOWED_USER,
+        text: 'hi',
+        thread_ts: '1.001',
+        ts: '5.005',
+      });
+
+      // forwardToClient called once with sessionId and correct envelope
+      expect(forwardToClient).toHaveBeenCalledTimes(1);
+      const [sessionId, envelope] = forwardToClient.mock.calls[0];
+      expect(sessionId).toBe('s1');
+      expect(envelope).toEqual({
+        type: 'inbound_message',
+        text: 'hi',
+        eventTs: '5.005',
+        userId: TEST_ALLOWED_USER,
+        channelId: TEST_CHANNEL_ID,
+      });
+
+      // primary mcp.notification NOT called
+      expect(mcpMock.notification).not.toHaveBeenCalled();
+
+      // cursor advanced exactly once
+      expect(getLastSeenEventTs()).toBe('5.005');
+    });
+
+    // -----------------------------------------------------------------------
+    // Step 5: write-failure synchronous fallback
+    // -----------------------------------------------------------------------
+
+    test('evicts and falls back to old_thread_reply when forwardToClient returns false', async () => {
+      const findClientByThread = mock((ts: string): string | null =>
+        ts === '1.001' ? 's1' : null,
+      );
+      const forwardToClient = mock(
+        (_sessionId: string, _msg: any): boolean => false, // dead socket
+      );
+      const evictClient = mock((_sessionId: string): void => {});
+
+      await startSlackWithIpc({
+        findClientByThread,
+        evictClient,
+        forwardToClient,
+      });
+
+      setActiveThreadTs('2.002');
+      setLastSeenEventTs(null);
+      mcpMock.notification.mockClear();
+
+      await simulateMessage({
+        user: TEST_ALLOWED_USER,
+        text: 'hi',
+        thread_ts: '1.001',
+        ts: '5.005',
+      });
+
+      // evictClient called with session ID
+      expect(evictClient).toHaveBeenCalledTimes(1);
+      expect(evictClient.mock.calls[0][0]).toBe('s1');
+
+      // old_thread_reply fallback — mcp.notification called (the forwarding path)
+      expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+      const content = mcpMock.notification.mock.calls[0][0].params.content;
+      expect(content).toContain('hi');
+
+      // cursor advanced exactly once (on old-thread-reply delivery)
+      expect(getLastSeenEventTs()).toBe('5.005');
+    });
+
+    // -----------------------------------------------------------------------
+    // Step 9: unknown thread (findClientByThread returns null) falls through
+    // -----------------------------------------------------------------------
+
+    test('falls through to old_thread_reply when findClientByThread returns null', async () => {
+      const findClientByThread = mock((_ts: string): string | null => null);
+      const forwardToClient = mock(
+        (_sessionId: string, _msg: any): boolean => true,
+      );
+      const evictClient = mock((_sessionId: string): void => {});
+
+      await startSlackWithIpc({
+        findClientByThread,
+        evictClient,
+        forwardToClient,
+      });
+
+      setActiveThreadTs('2.002');
+      setLastSeenEventTs(null);
+      mcpMock.notification.mockClear();
+
+      await simulateMessage({
+        user: TEST_ALLOWED_USER,
+        text: 'hello stranger',
+        thread_ts: '9.009',
+        ts: '5.005',
+      });
+
+      // existing old_thread_reply path runs
+      expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+
+      // forwardToClient NOT called
+      expect(forwardToClient).not.toHaveBeenCalled();
+
+      // evictClient NOT called
+      expect(evictClient).not.toHaveBeenCalled();
+
+      // cursor advanced exactly once
+      expect(getLastSeenEventTs()).toBe('5.005');
+    });
+
+    // -----------------------------------------------------------------------
+    // Step 11: regression — primary active thread still works correctly
+    // -----------------------------------------------------------------------
+
+    test('primary active thread path unaffected (thread_reply, no double-advance)', async () => {
+      const findClientByThread = mock((_ts: string): string | null => null);
+      const forwardToClient = mock(
+        (_sessionId: string, _msg: any): boolean => true,
+      );
+      const evictClient = mock((_sessionId: string): void => {});
+
+      await startSlackWithIpc({
+        findClientByThread,
+        evictClient,
+        forwardToClient,
+      });
+
+      setActiveThreadTs('2.002');
+      setLastSeenEventTs(null);
+      mcpMock.notification.mockClear();
+
+      await simulateMessage({
+        user: TEST_ALLOWED_USER,
+        text: 'primary message',
+        thread_ts: '2.002', // matches active thread
+        ts: '5.005',
+      });
+
+      // thread_reply path — mcp.notification called
+      expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+      const call = mcpMock.notification.mock.calls[0][0];
+      expect(call.method).toBe('notifications/claude/channel');
+      expect(call.params.content).toBe('primary message');
+
+      // forwardToClient NOT called
+      expect(forwardToClient).not.toHaveBeenCalled();
+
+      // cursor advanced exactly once (no double-advance)
+      expect(getLastSeenEventTs()).toBe('5.005');
+    });
+  });
+
+  // =========================================================================
   // Bot User ID Capture
   // =========================================================================
 

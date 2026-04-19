@@ -282,14 +282,45 @@ function registerBoltHandlers(mcp: Server) {
         userId: msg.user ?? '',
       });
     } else {
-      // Old thread reply — fetch summary, start new thread, forward with context
-      await forwardInboundMessage(mcp, {
-        type: 'old_thread_reply',
-        text,
-        eventTs,
-        userId: msg.user ?? '',
-        oldThreadTs: threadTs,
-      });
+      const sessionId = findClientByThread?.(threadTs) ?? null;
+      if (sessionId !== null) {
+        // Client-thread reply — forward to the owning IPC client
+        const envelope: IpcInboundMessage = {
+          type: 'inbound_message',
+          text,
+          eventTs,
+          userId: msg.user ?? '',
+          channelId,
+        };
+        let delivered = false;
+        try {
+          delivered = forwardToClient!(sessionId, envelope);
+        } catch {
+          delivered = false;
+        }
+        if (delivered) {
+          // fall through to single cursor-advancement below
+        } else {
+          // Client socket is dead — evict and fall back to old-thread-reply
+          evictClient!(sessionId);
+          await forwardInboundMessage(mcp, {
+            type: 'old_thread_reply',
+            text,
+            eventTs,
+            userId: msg.user ?? '',
+            oldThreadTs: threadTs,
+          });
+        }
+      } else {
+        // Old thread reply — fetch summary, start new thread, forward with context
+        await forwardInboundMessage(mcp, {
+          type: 'old_thread_reply',
+          text,
+          eventTs,
+          userId: msg.user ?? '',
+          oldThreadTs: threadTs,
+        });
+      }
     }
 
     // Advance cursor only after successful forward — if forwardInboundMessage

@@ -96,6 +96,9 @@ mock.module('@slack/bolt', () => {
 let ipcConnectBehavior: 'success' | 'fail' = 'fail';
 const ipcClientCloseMock = mock(() => {});
 let ipcOnDisconnect: ((info: { graceful: boolean }) => void) | undefined;
+let ipcOnInboundMessage:
+  | ((text: string, eventTs: string, userId: string, channelId: string) => void)
+  | undefined;
 
 mock.module('../src/ipc', () => {
   return {
@@ -104,6 +107,7 @@ mock.module('../src/ipc', () => {
       constructor(opts: any) {
         this.opts = opts;
         ipcOnDisconnect = opts.onDisconnect;
+        ipcOnInboundMessage = opts.onInboundMessage;
       }
       async connect() {
         if (ipcConnectBehavior === 'fail') {
@@ -1146,6 +1150,52 @@ describe('connect tool', () => {
       // Clean up
       ipcConnectBehavior = 'fail';
       setIpcClient(null);
+    });
+
+    test('IPC onInboundMessage fires mcp.notification with correct shape', async () => {
+      setMode('dormant');
+      ipcConnectBehavior = 'success';
+      setActivate(async () => {
+        throw new LockHeldError();
+      });
+
+      // Spy on mcp.notification to capture calls
+      const notificationMock = mock(async () => {});
+      const origNotification = (mcp as any).notification?.bind(mcp);
+      (mcp as any).notification = notificationMock;
+
+      try {
+        await callTool({
+          method: 'tools/call',
+          params: { name: 'connect', arguments: {} },
+        });
+        expect(getMode()).toBe('client');
+
+        // Fire the onInboundMessage callback
+        ipcOnInboundMessage?.(
+          'hello from relay',
+          '9876543210.111222',
+          'U0RELAYUSR',
+          'C0RELAYCHN',
+        );
+
+        // mcp.notification should have been called with notifications/claude/channel
+        const calls = notificationMock.mock.calls;
+        const inboundCall = calls.find(
+          (c: any[]) => c[0]?.method === 'notifications/claude/channel',
+        );
+        expect(inboundCall).toBeDefined();
+        const params = inboundCall![0].params;
+        expect(params.content).toBe('hello from relay');
+        expect(params.meta.slack_user_id).toBe('U0RELAYUSR');
+        expect(params.meta.channel_id).toBe('C0RELAYCHN');
+        expect(params.meta.event_ts).toBe('9876543210.111222');
+      } finally {
+        // Restore original notification
+        (mcp as any).notification = origNotification;
+        ipcConnectBehavior = 'fail';
+        setIpcClient(null);
+      }
     });
   });
 

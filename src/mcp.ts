@@ -274,6 +274,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
                 params: { request_id: requestId, behavior },
               });
             },
+            onInboundMessage: (text, eventTs, userId, channelId) => {
+              mcp
+                .notification({
+                  method: 'notifications/claude/channel',
+                  params: {
+                    content: text,
+                    meta: {
+                      slack_user_id: userId,
+                      channel_id: channelId,
+                      event_ts: eventTs,
+                    },
+                  },
+                })
+                .catch(() => {});
+            },
             onDisconnect: ({ graceful }) => {
               ipcClient = null;
               setMode('dormant');

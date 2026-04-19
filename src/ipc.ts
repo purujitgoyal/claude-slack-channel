@@ -654,7 +654,8 @@ export class IPCServer {
     }
   }
 
-  /** Handle client socket close: remove from connection map */
+  /** Socket-level close handler — extracts sessionId/intentionalClose from socket.data
+   *  and delegates to evictClient. */
   private handleClose(socket: BunSocket<SocketContext>): void {
     const sessionId = socket.data?.sessionId;
     if (!sessionId) return;

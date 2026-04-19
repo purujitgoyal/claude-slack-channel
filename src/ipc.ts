@@ -698,6 +698,15 @@ export class IPCServer {
     return null;
   }
 
+  /** Return an array of { sessionId, threadTs } for all connected clients */
+  listClientThreads(): Array<{ sessionId: string; threadTs: string }> {
+    const result: Array<{ sessionId: string; threadTs: string }> = [];
+    for (const [sessionId, entry] of this.clients.entries()) {
+      result.push({ sessionId, threadTs: entry.threadTs });
+    }
+    return result;
+  }
+
   /** Close the server: broadcast shutdown, close all sockets, unlink file */
   async close(): Promise<void> {
     // Clear the TTL sweep timer first

@@ -1997,6 +1997,54 @@ describe('findClientByThread', () => {
   });
 });
 
+// ── listClientThreads Tests ───────────────────────────────────────────────────
+
+describe('listClientThreads', () => {
+  test('returns array of { sessionId, threadTs } for all connected clients', () => {
+    const server = new IPCServer({
+      socketPath: '/tmp/test-list-clients.sock',
+      poster: async () => 'ts',
+      messageUpdater: async () => {},
+      reacter: async () => {},
+      channelId: 'C_TEST',
+    });
+
+    const stubSocket = { write: () => true } as any;
+    server.clients.set('s1', {
+      label: 'l1',
+      threadTs: '1.001',
+      socket: stubSocket,
+    });
+    server.clients.set('s2', {
+      label: 'l2',
+      threadTs: '2.002',
+      socket: stubSocket,
+    });
+
+    const result = server.listClientThreads();
+    // Order not guaranteed — compare as sorted arrays
+    const sorted = [...result].sort((a, b) =>
+      a.sessionId.localeCompare(b.sessionId),
+    );
+    expect(sorted).toEqual([
+      { sessionId: 's1', threadTs: '1.001' },
+      { sessionId: 's2', threadTs: '2.002' },
+    ]);
+  });
+
+  test('returns empty array when no clients connected', () => {
+    const server = new IPCServer({
+      socketPath: '/tmp/test-list-clients-empty.sock',
+      poster: async () => 'ts',
+      messageUpdater: async () => {},
+      reacter: async () => {},
+      channelId: 'C_TEST',
+    });
+
+    expect(server.listClientThreads()).toEqual([]);
+  });
+});
+
 // ── IPCClient onInboundMessage Tests ─────────────────────────────────────────
 
 describe('IPCClient onInboundMessage', () => {

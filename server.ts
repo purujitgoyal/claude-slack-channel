@@ -155,6 +155,7 @@ async function activate(): Promise<void> {
           postNotice: true,
         }),
       forwardToClient: (sid, msg) => ipcServer?.sendTo(sid, msg) ?? false,
+      listClientThreads: () => ipcServer?.listClientThreads() ?? [],
     });
 
     const addReaction = (ch: string, name: string, ts: string) =>

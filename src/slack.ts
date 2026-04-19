@@ -25,6 +25,9 @@ let evictClient: ((sessionId: string) => void) | undefined;
 let forwardToClient:
   | ((sessionId: string, msg: IpcInboundMessage) => boolean)
   | undefined;
+let listClientThreads:
+  | (() => Array<{ sessionId: string; threadTs: string }>)
+  | undefined;
 let cleanupMonitor: (() => void) | null = null;
 let botUserId: string | null = null;
 
@@ -47,6 +50,7 @@ export function resetIpcCallbacks(): void {
   findClientByThread = undefined;
   evictClient = undefined;
   forwardToClient = undefined;
+  listClientThreads = undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -698,12 +702,14 @@ export async function startSlack(opts: {
   findClientByThread?: (ts: string) => string | null;
   evictClient?: (sessionId: string) => void;
   forwardToClient?: (sessionId: string, msg: IpcInboundMessage) => boolean;
+  listClientThreads?: () => Array<{ sessionId: string; threadTs: string }>;
 }): Promise<App> {
   channelId = opts.channelId;
   allowedUserId = opts.allowedUserId;
   findClientByThread = opts.findClientByThread;
   evictClient = opts.evictClient;
   forwardToClient = opts.forwardToClient;
+  listClientThreads = opts.listClientThreads;
 
   bolt = new App({
     token: opts.botToken,
@@ -793,6 +799,42 @@ export async function recoverMissedMessages(
     }
   }
 
+  // Fetch replies for each connected client's thread in parallel
+  const clientThreadEntries = listClientThreads?.() ?? [];
+  const clientRepliesTagged: Array<any & { _clientSessionId: string }> = [];
+  if (clientThreadEntries.length > 0) {
+    const clientFetches = clientThreadEntries.map(
+      async ({ sessionId, threadTs }) => {
+        try {
+          const result = await bolt!.client.conversations.replies({
+            channel: channelId,
+            ts: threadTs,
+            oldest,
+            limit: 100,
+          });
+          const messages = result.messages ?? [];
+          // Filter: allowed user, in this thread, exclude parent
+          const filtered = messages.filter(
+            (msg: any) =>
+              msg.user === allowedUserId &&
+              msg.thread_ts === threadTs &&
+              msg.ts !== threadTs,
+          );
+          for (const m of filtered) {
+            clientRepliesTagged.push({ ...m, _clientSessionId: sessionId });
+          }
+        } catch (err: any) {
+          const msg = err?.message ?? String(err);
+          log(
+            `recoverMissedMessages: conversations.replies for client thread ${threadTs} failed: ${msg}`,
+          );
+          // Partial recovery — continue with remaining clients
+        }
+      },
+    );
+    await Promise.all(clientFetches);
+  }
+
   // Filter history: keep only messages from the allowed user that mention the bot
   const mentionFilter = botUserId
     ? (msg: any) =>
@@ -812,8 +854,9 @@ export async function recoverMissedMessages(
       )
     : [];
 
-  // Combine, drop already-seen events, sort ascending by ts
-  const all = [...mentions, ...replies];
+  // Combine all messages (primary mentions, primary thread replies, client thread replies),
+  // drop already-seen events, sort ascending by ts
+  const all = [...mentions, ...replies, ...clientRepliesTagged];
   const unseen = sinceTs
     ? all.filter((msg: any) => (msg.ts ?? '') > sinceTs)
     : all;
@@ -836,24 +879,58 @@ export async function recoverMissedMessages(
     if (botUserId && userId === botUserId) continue;
 
     try {
-      // Classify: thread_reply if in the active thread; app_mention otherwise
-      if (activeThreadTs && msg.thread_ts === activeThreadTs) {
-        await forwardInboundMessage(mcp, {
-          type: 'thread_reply',
+      if (msg._clientSessionId) {
+        // Client-thread reply — route to the owning IPC client
+        const sessionId: string = msg._clientSessionId;
+        const envelope: IpcInboundMessage = {
+          type: 'inbound_message',
           text,
           eventTs: ts,
           userId,
-        });
+          channelId,
+        };
+        let delivered = false;
+        try {
+          delivered = forwardToClient!(sessionId, envelope);
+        } catch {
+          delivered = false;
+        }
+        if (delivered) {
+          setLastSeenEventTs(ts);
+          recoveredCount++;
+        } else {
+          // Client socket is dead — evict and fall back to old_thread_reply
+          evictClient!(sessionId);
+          await forwardInboundMessage(mcp, {
+            type: 'old_thread_reply',
+            text,
+            eventTs: ts,
+            userId,
+            oldThreadTs: msg.thread_ts ?? ts,
+          });
+          setLastSeenEventTs(ts);
+          recoveredCount++;
+        }
       } else {
-        await forwardInboundMessage(mcp, {
-          type: 'app_mention',
-          text,
-          eventTs: ts,
-          userId,
-        });
+        // Classify: thread_reply if in the active thread; app_mention otherwise
+        if (activeThreadTs && msg.thread_ts === activeThreadTs) {
+          await forwardInboundMessage(mcp, {
+            type: 'thread_reply',
+            text,
+            eventTs: ts,
+            userId,
+          });
+        } else {
+          await forwardInboundMessage(mcp, {
+            type: 'app_mention',
+            text,
+            eventTs: ts,
+            userId,
+          });
+        }
+        setLastSeenEventTs(ts);
+        recoveredCount++;
       }
-      setLastSeenEventTs(ts);
-      recoveredCount++;
     } catch (err: any) {
       log(
         `recoverMissedMessages: failed to forward message ${ts}: ${err?.message ?? err}`,

@@ -610,12 +610,13 @@ export class IPCServer {
     }
   }
 
-  /** Handle client socket close: remove from connection map */
-  private handleClose(socket: BunSocket<SocketContext>): void {
-    const sessionId = socket.data?.sessionId;
-    if (!sessionId) return;
-
-    const intentional = socket.data?.intentionalClose === true;
+  /** Evict a client by sessionId: remove from maps, clean up perm routing, optionally post disconnect notice.
+   *  Idempotent: if the client is already removed, this is a no-op. */
+  evictClient(
+    sessionId: string,
+    opts: { intentional: boolean; postNotice: boolean },
+  ): void {
+    if (!this.clients.has(sessionId)) return;
 
     const client = this.clients.get(sessionId);
     this.clients.delete(sessionId);
@@ -630,7 +631,7 @@ export class IPCServer {
     for (const [reqId, entry] of toRemove) {
       this.permRouting.delete(reqId);
       // Update pending Slack perm messages (best-effort) — skip on intentional close
-      if (!intentional && entry.slackTs) {
+      if (!opts.intentional && entry.slackTs) {
         this.opts
           .messageUpdater(
             this.opts.channelId,
@@ -643,7 +644,7 @@ export class IPCServer {
     }
 
     // Post "session disconnected" in the client's thread (best-effort) — skip on intentional close
-    if (!intentional && client?.threadTs) {
+    if (opts.postNotice && !opts.intentional && client?.threadTs) {
       this.opts
         .poster({
           text: '\u26a0\ufe0f Session disconnected.',
@@ -651,6 +652,15 @@ export class IPCServer {
         })
         .catch(() => {});
     }
+  }
+
+  /** Handle client socket close: remove from connection map */
+  private handleClose(socket: BunSocket<SocketContext>): void {
+    const sessionId = socket.data?.sessionId;
+    if (!sessionId) return;
+
+    const intentional = socket.data?.intentionalClose === true;
+    this.evictClient(sessionId, { intentional, postNotice: true });
   }
 
   /** Send a message to a specific client by sessionId */

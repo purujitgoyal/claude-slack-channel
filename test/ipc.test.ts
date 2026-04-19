@@ -1217,6 +1217,118 @@ describe('IPCServer client disconnect cleanup', () => {
   });
 });
 
+// ── evictClient idempotency Tests ─────────────────────────────────────────
+
+describe('evictClient', () => {
+  let server: IPCServer;
+  let sockPath: string;
+  let posterMock: ReturnType<typeof mock>;
+  let messageUpdaterMock: ReturnType<typeof mock>;
+  let reacterMock: ReturnType<typeof mock>;
+
+  beforeEach(() => {
+    sockPath = tmpSock();
+    posterMock = mock(async () => `thread-ts-${randomUUID()}`);
+    messageUpdaterMock = mock(async () => {});
+    reacterMock = mock(async () => {});
+    server = new IPCServer({
+      socketPath: sockPath,
+      poster: posterMock as any,
+      messageUpdater: messageUpdaterMock as any,
+      reacter: reacterMock as any,
+      channelId: 'C-test',
+    });
+  });
+
+  afterEach(async () => {
+    try {
+      await server.close();
+    } catch {
+      // already closed
+    }
+    try {
+      if (existsSync(sockPath)) unlinkSync(sockPath);
+    } catch {
+      // ignore
+    }
+  });
+
+  test('evictClient idempotency: disconnect notice posted exactly once on double call', async () => {
+    // Populate one client entry directly
+    const fakeSocket = {} as any;
+    server.clients.set('s1', {
+      label: 'test',
+      threadTs: 'thread-ts-s1',
+      socket: fakeSocket,
+    });
+    // Add a permRouting entry for s1
+    server.permRouting.set('req-s1', {
+      sessionId: 's1',
+      slackTs: 'slack-ts-s1',
+      timestamp: Date.now(),
+      toolName: 'Bash',
+      description: 'Run command',
+      inputPreview: 'ls',
+    });
+
+    // First call — should evict and post notice
+    server.evictClient('s1', { intentional: false, postNotice: true });
+    // Second call — should be a no-op (client already removed)
+    server.evictClient('s1', { intentional: false, postNotice: true });
+
+    // Allow any async poster calls to settle
+    await delay(50);
+
+    // Disconnect notice should have been posted exactly once
+    const noticeCalls = posterMock.mock.calls.filter(
+      (c: any) =>
+        c[0]?.text?.includes('disconnected') &&
+        c[0]?.thread_ts === 'thread-ts-s1',
+    );
+    expect(noticeCalls.length).toBe(1);
+
+    // Client entry must be removed
+    expect(server.clients.has('s1')).toBe(false);
+
+    // permRouting entries for s1 must be cleared
+    expect(server.permRouting.has('req-s1')).toBe(false);
+  });
+
+  test('evictClient race idempotency: handleClose after evictClient posts notice exactly once', async () => {
+    // Populate one client entry directly
+    const fakeSocket: any = {
+      data: {
+        sessionId: 's1',
+        intentionalClose: false,
+        lineBuffer: null,
+      },
+    };
+    server.clients.set('s1', {
+      label: 'test',
+      threadTs: 'thread-ts-race',
+      socket: fakeSocket,
+    });
+
+    // Simulate a bolt write-failure path calling evictClient first
+    server.evictClient('s1', { intentional: false, postNotice: true });
+
+    // Then the kernel close event fires, triggering handleClose for the same socket
+    // (handleClose is private, so we access it via a type cast)
+    (server as any).handleClose(fakeSocket);
+
+    // Allow async poster calls to settle
+    await delay(50);
+
+    // Disconnect notice should have been posted exactly once across both calls
+    const noticeCalls = posterMock.mock.calls.filter(
+      (c: any) =>
+        c[0]?.text?.includes('disconnected') &&
+        c[0]?.thread_ts === 'thread-ts-race',
+    );
+    expect(noticeCalls.length).toBe(1);
+  });
+});
+
 // ── routeVerdict Tests ──────────────────────────────────────────────────
 
 describe('routeVerdict', () => {

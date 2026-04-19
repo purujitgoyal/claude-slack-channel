@@ -77,9 +77,13 @@ mock.module('@slack/bolt', () => {
 // Import modules under test
 // ---------------------------------------------------------------------------
 
-const { startSlack, stopSlack, getBotUserId, resetBotUserId } = await import(
-  '../src/slack'
-);
+const {
+  startSlack,
+  stopSlack,
+  getBotUserId,
+  resetBotUserId,
+  resetIpcCallbacks,
+} = await import('../src/slack');
 const {
   setActiveThreadTs,
   getActiveThreadTs,
@@ -154,6 +158,7 @@ describe('Bolt Handlers', () => {
     setActiveServer(null);
     await stopSlack();
     resetBotUserId();
+    resetIpcCallbacks();
   });
 
   // =========================================================================
@@ -1000,6 +1005,8 @@ describe('Bolt Handlers', () => {
   // =========================================================================
 
   describe('startSlack IPC callback opts', () => {
+    // Behavior verification deferred to Task 7 — this test guards only the
+    // type contract (that startSlack's opts accepts the three IPC callbacks).
     test('accepts findClientByThread, evictClient, forwardToClient in opts', async () => {
       await stopSlack();
       resetBotUserId();

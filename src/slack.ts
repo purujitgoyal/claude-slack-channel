@@ -20,11 +20,11 @@ import {
 let bolt: App | null = null;
 let channelId = '';
 let allowedUserId = '';
-let findClientByThread: ((ts: string) => string | null) | null = null;
-let evictClient: ((sessionId: string) => void) | null = null;
+let findClientByThread: ((ts: string) => string | null) | undefined;
+let evictClient: ((sessionId: string) => void) | undefined;
 let forwardToClient:
   | ((sessionId: string, msg: IpcInboundMessage) => boolean)
-  | null = null;
+  | undefined;
 let cleanupMonitor: (() => void) | null = null;
 let botUserId: string | null = null;
 
@@ -40,6 +40,13 @@ export function getBotUserId(): string | null {
 /** Resets botUserId to null — test-only, used in afterEach to prevent cross-test state leakage. */
 export function resetBotUserId(): void {
   botUserId = null;
+}
+
+/** Resets IPC callback refs — test-only, used in afterEach to prevent cross-test state leakage. */
+export function resetIpcCallbacks(): void {
+  findClientByThread = undefined;
+  evictClient = undefined;
+  forwardToClient = undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -663,9 +670,9 @@ export async function startSlack(opts: {
 }): Promise<App> {
   channelId = opts.channelId;
   allowedUserId = opts.allowedUserId;
-  findClientByThread = opts.findClientByThread ?? null;
-  evictClient = opts.evictClient ?? null;
-  forwardToClient = opts.forwardToClient ?? null;
+  findClientByThread = opts.findClientByThread;
+  evictClient = opts.evictClient;
+  forwardToClient = opts.forwardToClient;
 
   bolt = new App({
     token: opts.botToken,

@@ -679,6 +679,14 @@ export class IPCServer {
     }
   }
 
+  /** Return the sessionId whose threadTs matches, or null if not found */
+  findClientByThread(threadTs: string): string | null {
+    for (const [sessionId, entry] of this.clients.entries()) {
+      if (entry.threadTs === threadTs) return sessionId;
+    }
+    return null;
+  }
+
   /** Close the server: broadcast shutdown, close all sockets, unlink file */
   async close(): Promise<void> {
     // Clear the TTL sweep timer first

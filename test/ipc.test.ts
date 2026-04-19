@@ -1860,3 +1860,27 @@ describe('Multi-session IPC integration', () => {
     expect(server.clients.has('e2e-sess-1')).toBe(false);
   });
 });
+
+// ── findClientByThread Tests ─────────────────────────────────────────────
+
+describe('findClientByThread', () => {
+  test('returns sessionId when threadTs matches, null when not found', () => {
+    const server = new IPCServer({
+      socketPath: '/tmp/test-find-client.sock',
+      poster: async () => 'ts',
+      messageUpdater: async () => {},
+      reacter: async () => {},
+      channelId: 'C_TEST',
+    });
+
+    const stubSocket = { write: () => true } as any;
+    server.clients.set('s1', {
+      label: 'l1',
+      threadTs: '1.001',
+      socket: stubSocket,
+    });
+
+    expect(server.findClientByThread('1.001')).toBe('s1');
+    expect(server.findClientByThread('9.999')).toBeNull();
+  });
+});

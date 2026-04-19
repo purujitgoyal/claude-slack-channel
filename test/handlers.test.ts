@@ -1151,6 +1151,12 @@ describe('Bolt Handlers', () => {
       const content = mcpMock.notification.mock.calls[0][0].params.content;
       expect(content).toContain('hi');
 
+      // Eviction must fire BEFORE the old-thread-reply notification so the user
+      // sees the disconnect notice even if forwardInboundMessage later throws.
+      expect(evictClient.mock.invocationCallOrder[0]).toBeLessThan(
+        mcpMock.notification.mock.invocationCallOrder[0],
+      );
+
       // cursor advanced exactly once (on old-thread-reply delivery)
       expect(getLastSeenEventTs()).toBe('5.005');
     });

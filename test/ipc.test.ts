@@ -13,6 +13,7 @@ import type { IPCMessage, ServerMessage } from '../src/ipc';
 import {
   encode,
   IPCClient,
+  IPCMessageSchema,
   IPCServer,
   LineBuffer,
   routeVerdict,
@@ -1519,6 +1520,71 @@ describe('IPCServer TTL sweep', () => {
 
     // After close, sweepTimer should be null/cleared
     expect((server as any).sweepTimer).toBeNull();
+  });
+});
+
+// ── InboundMessageSchema Tests ──────────────────────────────────────────
+
+describe('inbound_message schema', () => {
+  test('parses a valid inbound_message', () => {
+    const result = IPCMessageSchema.parse({
+      type: 'inbound_message',
+      text: 'hi',
+      eventTs: '123.456',
+      userId: 'U1',
+      channelId: 'C123',
+    });
+    expect(result).toEqual({
+      type: 'inbound_message',
+      text: 'hi',
+      eventTs: '123.456',
+      userId: 'U1',
+      channelId: 'C123',
+    });
+  });
+
+  test('throws when text is missing', () => {
+    expect(() =>
+      IPCMessageSchema.parse({
+        type: 'inbound_message',
+        eventTs: '123.456',
+        userId: 'U1',
+        channelId: 'C123',
+      }),
+    ).toThrow();
+  });
+
+  test('throws when eventTs is missing', () => {
+    expect(() =>
+      IPCMessageSchema.parse({
+        type: 'inbound_message',
+        text: 'hi',
+        userId: 'U1',
+        channelId: 'C123',
+      }),
+    ).toThrow();
+  });
+
+  test('throws when userId is missing', () => {
+    expect(() =>
+      IPCMessageSchema.parse({
+        type: 'inbound_message',
+        text: 'hi',
+        eventTs: '123.456',
+        channelId: 'C123',
+      }),
+    ).toThrow();
+  });
+
+  test('throws when channelId is missing', () => {
+    expect(() =>
+      IPCMessageSchema.parse({
+        type: 'inbound_message',
+        text: 'hi',
+        eventTs: '123.456',
+        userId: 'U1',
+      }),
+    ).toThrow();
   });
 });
 

@@ -87,6 +87,14 @@ export const PermResponseSchema = z.object({
   behavior: z.string(),
 });
 
+export const InboundMessageSchema = z.object({
+  type: z.literal('inbound_message'),
+  text: z.string(),
+  eventTs: z.string(),
+  userId: z.string(),
+  channelId: z.string(),
+});
+
 export const ShutdownSchema = z.object({
   type: z.literal('shutdown'),
 });
@@ -114,6 +122,7 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   NewThreadAckSchema,
   ReactAckSchema,
   PermResponseSchema,
+  InboundMessageSchema,
   ShutdownSchema,
   ErrorSchema,
 ]);
@@ -137,6 +146,7 @@ export type SendAckMessage = z.infer<typeof SendAckSchema>;
 export type NewThreadAckMessage = z.infer<typeof NewThreadAckSchema>;
 export type ReactAckMessage = z.infer<typeof ReactAckSchema>;
 export type PermResponseMessage = z.infer<typeof PermResponseSchema>;
+export type InboundMessage = z.infer<typeof InboundMessageSchema>;
 export type ShutdownMessage = z.infer<typeof ShutdownSchema>;
 export type ErrorMessage = z.infer<typeof ErrorSchema>;
 

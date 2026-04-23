@@ -753,20 +753,34 @@ export async function startSlack(opts: {
 // in the same epoch range. If Slack ever changes the format, this breaks.
 // ---------------------------------------------------------------------------
 
-export async function recoverMissedMessages(
-  mcp: Server,
-  sinceTs: string | null,
-): Promise<{ recovered: number; error?: string }> {
-  if (!bolt) return { recovered: 0 };
+// Discriminated union: 'primary' = mention or active-thread reply (destined
+// for the primary MCP session); 'client' = reply in a connected IPC client's
+// thread (destined for that client via IPC).
+type DispatchItem =
+  | { kind: 'primary'; msg: any }
+  | { kind: 'client'; msg: any; sessionId: string };
 
-  // Compute oldest: use sinceTs if available, otherwise cap at now - 3600s
-  const oldest = sinceTs ?? String((Date.now() / 1000 - 3600).toFixed(6));
+type FetchedSources = {
+  historyMessages: any[];
+  repliesMessages: any[];
+  clientRepliesTagged: Array<{ msg: any; sessionId: string }>;
+  apiError: string | undefined;
+};
+
+// Fetch channel history, the active-thread replies, and per-connected-client
+// thread replies (in parallel). History failure is fatal — returned as
+// `{ fatal }` so the caller returns early. Replies failures log and continue:
+// partial recovery beats none.
+async function fetchAllSources(
+  oldest: string,
+  activeThreadTs: string | null,
+): Promise<FetchedSources | { fatal: string }> {
+  if (!bolt) return { fatal: 'bolt not initialized' };
 
   let historyMessages: any[] = [];
   let repliesMessages: any[] = [];
   let apiError: string | undefined;
 
-  // Fetch channel history for @mentions
   try {
     const result = await bolt.client.conversations.history({
       channel: channelId,
@@ -777,11 +791,9 @@ export async function recoverMissedMessages(
   } catch (err: any) {
     const msg = err?.message ?? String(err);
     log(`recoverMissedMessages: conversations.history failed: ${msg}`);
-    return { recovered: 0, error: msg };
+    return { fatal: msg };
   }
 
-  // Fetch active thread replies (if any)
-  const activeThreadTs = getActiveThreadTs();
   if (activeThreadTs) {
     try {
       const result = await bolt.client.conversations.replies({
@@ -795,59 +807,67 @@ export async function recoverMissedMessages(
       const msg = err?.message ?? String(err);
       log(`recoverMissedMessages: conversations.replies failed: ${msg}`);
       apiError = msg;
-      // Continue with whatever history we got — partial recovery is better than none
+      // Continue with whatever history we got — partial recovery beats none.
     }
   }
 
-  // Fetch replies for each connected client's thread in parallel.
-  // Store as wrapper objects { msg, sessionId } — avoids mutating Slack message
-  // shape (Slack adds fields over time; an in-band _clientSessionId tag would
-  // collide if Slack ever introduced such a field).
+  // Per-client-thread replies in parallel. Wrapped as { msg, sessionId } so
+  // each message carries its routing origin without mutating Slack shape.
   const clientThreadEntries = listClientThreads?.() ?? [];
   const clientRepliesTagged: Array<{ msg: any; sessionId: string }> = [];
   if (clientThreadEntries.length > 0) {
-    const clientFetches = clientThreadEntries.map(
-      async ({ sessionId, threadTs }) => {
-        try {
-          const result = await bolt!.client.conversations.replies({
-            channel: channelId,
-            ts: threadTs,
-            oldest,
-            limit: 100,
-          });
-          const messages = result.messages ?? [];
-          // Filter: allowed user, in this thread, exclude parent
-          const filtered = messages.filter(
-            (msg: any) =>
-              msg.user === allowedUserId &&
-              msg.thread_ts === threadTs &&
-              msg.ts !== threadTs,
-          );
-          for (const m of filtered) {
-            clientRepliesTagged.push({ msg: m, sessionId });
-          }
-        } catch (err: any) {
-          const msg = err?.message ?? String(err);
-          log(
-            `recoverMissedMessages: conversations.replies for client thread ${threadTs} failed: ${msg}`,
-          );
-          // Partial recovery — continue with remaining clients
+    const fetches = clientThreadEntries.map(async ({ sessionId, threadTs }) => {
+      try {
+        const result = await bolt!.client.conversations.replies({
+          channel: channelId,
+          ts: threadTs,
+          oldest,
+          limit: 100,
+        });
+        const messages = result.messages ?? [];
+        // Allowed user, in this thread, exclude the parent.
+        const filtered = messages.filter(
+          (msg: any) =>
+            msg.user === allowedUserId &&
+            msg.thread_ts === threadTs &&
+            msg.ts !== threadTs,
+        );
+        for (const m of filtered) {
+          clientRepliesTagged.push({ msg: m, sessionId });
         }
-      },
-    );
-    await Promise.all(clientFetches);
+      } catch (err: any) {
+        const msg = err?.message ?? String(err);
+        log(
+          `recoverMissedMessages: conversations.replies for client thread ${threadTs} failed: ${msg}`,
+        );
+        // Partial recovery — continue with remaining clients.
+      }
+    });
+    await Promise.all(fetches);
   }
 
-  // Filter history: keep only messages from the allowed user that mention the bot
-  const mentionFilter = botUserId
+  return { historyMessages, repliesMessages, clientRepliesTagged, apiError };
+}
+
+// Filter + combine + dedupe + sort fetched sources into an ordered queue.
+// Sort is ascending by ts (lexicographic is monotonic for Slack's
+// zero-padded "seconds.microseconds" format).
+function buildDispatchQueue(
+  sources: FetchedSources,
+  sinceTs: string | null,
+  activeThreadTs: string | null,
+): DispatchItem[] {
+  const { historyMessages, repliesMessages, clientRepliesTagged } = sources;
+
+  // History: allowed user, mentioning the bot (when we know its id).
+  // Precompute the needle so it isn't rebuilt per message.
+  const mentionNeedle = botUserId ? `<@${botUserId}>` : null;
+  const mentionFilter = mentionNeedle
     ? (msg: any) =>
-        msg.user === allowedUserId &&
-        (msg.text ?? '').includes(`<@${botUserId}>`)
+        msg.user === allowedUserId && (msg.text ?? '').includes(mentionNeedle)
     : (msg: any) => msg.user === allowedUserId;
   const mentions = historyMessages.filter(mentionFilter);
 
-  // Filter replies: keep only replies from the allowed user in the active thread
-  // (exclude the parent message itself — ts === thread_ts is the parent)
   const replies = activeThreadTs
     ? repliesMessages.filter(
         (msg: any) =>
@@ -856,14 +876,6 @@ export async function recoverMissedMessages(
           msg.ts !== activeThreadTs,
       )
     : [];
-
-  // Combine all messages as a discriminated union. Primary messages (mentions +
-  // primary thread replies) are wrapped as { kind: 'primary', msg }; client thread
-  // replies are wrapped as { kind: 'client', msg, sessionId }. This keeps each
-  // message's routing origin explicit at the dispatch site.
-  type DispatchItem =
-    | { kind: 'primary'; msg: any }
-    | { kind: 'client'; msg: any; sessionId: string };
 
   const all: DispatchItem[] = [
     ...mentions.map((msg: any): DispatchItem => ({ kind: 'primary', msg })),
@@ -877,7 +889,6 @@ export async function recoverMissedMessages(
     ),
   ];
 
-  // Drop already-seen events, sort ascending by ts
   const unseen = sinceTs
     ? all.filter((item) => (item.msg.ts ?? '') > sinceTs)
     : all;
@@ -888,99 +899,126 @@ export async function recoverMissedMessages(
     if (ta > tb) return 1;
     return 0;
   });
+  return unseen;
+}
+
+// Per-item outcome:
+//   'delivered' — message handled; advance cursor and count it.
+//   'skipped'   — intentionally ignored (e.g. bot's own echo); don't advance,
+//                 don't count. Next successful non-bot message will advance
+//                 past it naturally since ts is monotonic.
+//   'failed'    — exception during delivery; don't advance so the next
+//                 recovery pass can retry.
+type DispatchResult = 'delivered' | 'skipped' | 'failed';
+
+async function dispatchItem(
+  mcp: Server,
+  item: DispatchItem,
+  activeThreadTs: string | null,
+): Promise<DispatchResult> {
+  const msg = item.msg;
+  const ts: string = msg.ts ?? '';
+  const text: string = msg.text ?? '';
+  const userId: string = msg.user ?? '';
+  const oldThreadTs: string = msg.thread_ts ?? ts;
+
+  if (botUserId && userId === botUserId) return 'skipped';
+
+  const sendOldThreadReply = () =>
+    forwardInboundMessage(mcp, {
+      type: 'old_thread_reply',
+      text,
+      eventTs: ts,
+      userId,
+      oldThreadTs,
+    });
+
+  try {
+    if (item.kind === 'client') {
+      const sessionId = item.sessionId;
+
+      // Graceful degradation: if IPC callbacks aren't wired, treat the client
+      // as dead and fall back to old_thread_reply on primary.
+      if (!forwardToClient || !evictClient) {
+        await sendOldThreadReply();
+        return 'delivered';
+      }
+
+      const envelope: IpcInboundMessage = {
+        type: 'inbound_message',
+        text,
+        eventTs: ts,
+        userId,
+        channelId,
+      };
+      let delivered = false;
+      try {
+        delivered = forwardToClient(sessionId, envelope);
+      } catch {
+        delivered = false;
+      }
+      if (delivered) return 'delivered';
+
+      // Client socket is dead — evict and fall back to old_thread_reply.
+      evictClient(sessionId);
+      await sendOldThreadReply();
+      return 'delivered';
+    }
+
+    if (activeThreadTs && msg.thread_ts === activeThreadTs) {
+      await forwardInboundMessage(mcp, {
+        type: 'thread_reply',
+        text,
+        eventTs: ts,
+        userId,
+      });
+    } else {
+      await forwardInboundMessage(mcp, {
+        type: 'app_mention',
+        text,
+        eventTs: ts,
+        userId,
+      });
+    }
+    return 'delivered';
+  } catch (err: any) {
+    log(
+      `recoverMissedMessages: failed to forward message ${ts}: ${err?.message ?? err}`,
+    );
+    return 'failed';
+  }
+}
+
+export async function recoverMissedMessages(
+  mcp: Server,
+  sinceTs: string | null,
+): Promise<{ recovered: number; error?: string }> {
+  if (!bolt) return { recovered: 0 };
+
+  // If no prior cursor, cap history lookback at 1 hour to avoid flooding.
+  const oldest = sinceTs ?? String((Date.now() / 1000 - 3600).toFixed(6));
+  const activeThreadTs = getActiveThreadTs();
+
+  const sources = await fetchAllSources(oldest, activeThreadTs);
+  if ('fatal' in sources) return { recovered: 0, error: sources.fatal };
+
+  const queue = buildDispatchQueue(sources, sinceTs, activeThreadTs);
 
   let recoveredCount = 0;
-
-  for (const item of unseen) {
-    const msg = item.msg;
-    const ts: string = msg.ts ?? '';
-    const text: string = msg.text ?? '';
-    const userId: string = msg.user ?? '';
-
-    // Skip bot's own messages
-    if (botUserId && userId === botUserId) continue;
-
-    try {
-      if (item.kind === 'client') {
-        const sessionId = item.sessionId;
-
-        // Graceful degradation: if IPC callbacks aren't wired, treat the client
-        // as dead and fall back to old_thread_reply on primary.
-        if (!forwardToClient || !evictClient) {
-          await forwardInboundMessage(mcp, {
-            type: 'old_thread_reply',
-            text,
-            eventTs: ts,
-            userId,
-            oldThreadTs: msg.thread_ts ?? ts,
-          });
-          setLastSeenEventTs(ts);
-          recoveredCount++;
-          continue;
-        }
-
-        // Client-thread reply — route to the owning IPC client
-        const envelope: IpcInboundMessage = {
-          type: 'inbound_message',
-          text,
-          eventTs: ts,
-          userId,
-          channelId,
-        };
-        let delivered = false;
-        try {
-          delivered = forwardToClient(sessionId, envelope);
-        } catch {
-          delivered = false;
-        }
-        if (delivered) {
-          setLastSeenEventTs(ts);
-          recoveredCount++;
-        } else {
-          // Client socket is dead — evict and fall back to old_thread_reply
-          evictClient(sessionId);
-          await forwardInboundMessage(mcp, {
-            type: 'old_thread_reply',
-            text,
-            eventTs: ts,
-            userId,
-            oldThreadTs: msg.thread_ts ?? ts,
-          });
-          setLastSeenEventTs(ts);
-          recoveredCount++;
-        }
-      } else {
-        // Classify: thread_reply if in the active thread; app_mention otherwise
-        if (activeThreadTs && msg.thread_ts === activeThreadTs) {
-          await forwardInboundMessage(mcp, {
-            type: 'thread_reply',
-            text,
-            eventTs: ts,
-            userId,
-          });
-        } else {
-          await forwardInboundMessage(mcp, {
-            type: 'app_mention',
-            text,
-            eventTs: ts,
-            userId,
-          });
-        }
-        setLastSeenEventTs(ts);
-        recoveredCount++;
-      }
-    } catch (err: any) {
-      log(
-        `recoverMissedMessages: failed to forward message ${ts}: ${err?.message ?? err}`,
-      );
-      // Do not advance cursor — leave it for retry on next recovery pass
+  for (const item of queue) {
+    const ts: string = item.msg.ts ?? '';
+    const outcome = await dispatchItem(mcp, item, activeThreadTs);
+    if (outcome === 'delivered') {
+      setLastSeenEventTs(ts);
+      recoveredCount++;
     }
+    // 'skipped' and 'failed' deliberately leave the cursor alone.
   }
 
   const result: { recovered: number; error?: string } = {
     recovered: recoveredCount,
   };
-  if (apiError !== undefined) result.error = apiError;
+  if (sources.apiError !== undefined) result.error = sources.apiError;
   return result;
 }
 

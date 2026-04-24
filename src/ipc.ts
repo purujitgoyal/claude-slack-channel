@@ -1008,13 +1008,19 @@ export class IPCClient {
     description: string,
     inputPreview: string,
   ): void {
-    this.send({
-      type: 'perm_request',
-      requestId,
-      toolName,
-      description,
-      inputPreview,
-    });
+    try {
+      this.send({
+        type: 'perm_request',
+        requestId,
+        toolName,
+        description,
+        inputPreview,
+      });
+      log(`sendPermRequest ${requestId} (${toolName}) written to IPC socket`);
+    } catch (err) {
+      log(`sendPermRequest ${requestId} (${toolName}) failed: ${err}`);
+      throw err;
+    }
   }
 
   /**

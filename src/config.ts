@@ -127,13 +127,25 @@ export const SESSION_PATH = join(CHANNELS_DIR, 'session.json');
 export const LOCK_PATH = join(CHANNELS_DIR, 'server.lock');
 export const SOCKET_PATH = join(CHANNELS_DIR, 'primary.sock');
 
+// Project directory, set from the MCP `roots/list` response when the client
+// advertises the roots capability. `process.cwd()` in an MCP plugin subprocess
+// is the plugin install dir (version-bucketed, not the user's workspace), so
+// naked cwd produces labels like "0.9.0". When unset, we fall back to cwd —
+// same behavior as before this seam existed; the fix just opts-in when the
+// host provides the signal.
+let projectDir: string | null = null;
+
+export function setProjectDir(dir: string | null): void {
+  projectDir = dir;
+}
+
 /**
  * Returns a human-readable session label: `basename(cwd):git-branch`.
  * Falls back to just `basename(cwd)` if not in a git repo or git fails.
  * Sanitized: trimmed, backticks stripped, truncated to 60 chars.
  */
 export function getSessionLabel(): string {
-  const cwd = process.cwd();
+  const cwd = projectDir ?? process.cwd();
   const base = basename(cwd);
 
   let branch = '';

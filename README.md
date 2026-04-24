@@ -179,7 +179,7 @@ Uses [Biome](https://biomejs.dev) for linting and formatting.
 - One Slack app per user — Slack's Socket Mode doesn't support sharing an app across users (events are round-robined, not duplicated)
 - Single Claude Code session per user at a time (enforced by `flock(2)` — second session gets a clear error)
 - No file attachment support yet
-- Inbound messages require `--dangerously-load-development-channels` flag for personal use (Team/Enterprise admins can use `allowedChannelPlugins` in managed settings instead)
+- Inbound messages and permission relay require the `--dangerously-load-development-channels` flag for personal use (Team/Enterprise admins can use `allowedChannelPlugins` in managed settings instead). Without it, permission prompts appear in Claude Code's terminal UI instead of Slack. The `connect` tool's response text reminds you of the requirement.
 - Permission relay requires Claude Code v2.1.81+
 
 ### Sleep/wake and the Slack connection

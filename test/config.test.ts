@@ -14,6 +14,7 @@ import {
   loadEnv,
   MENTION_RE,
   SOCKET_PATH,
+  setProjectDir,
   stripMentions,
   textResult,
 } from '../src/config';
@@ -224,5 +225,25 @@ describe('getSessionLabel', () => {
   test('does not exceed 60 characters', () => {
     const label = getSessionLabel();
     expect(label.length).toBeLessThanOrEqual(60);
+  });
+
+  test('prefers projectDir when set via setProjectDir', () => {
+    // Use a path that is both real and not a git repo so the label collapses
+    // to the bare basename — easy to assert against.
+    setProjectDir('/tmp');
+    try {
+      const label = getSessionLabel();
+      expect(label).toBe('tmp');
+    } finally {
+      setProjectDir(null);
+    }
+  });
+
+  test('falls back to process.cwd() when projectDir is null', () => {
+    setProjectDir(null);
+    const cwd = process.cwd();
+    const base = cwd.split('/').pop()!;
+    const label = getSessionLabel();
+    expect(label).toContain(base);
   });
 });

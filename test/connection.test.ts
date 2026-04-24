@@ -1076,7 +1076,9 @@ describe('connect tool', () => {
         params: { name: 'connect', arguments: {} },
       });
       expect(activateMock).toHaveBeenCalledTimes(1);
-      expect(result.content[0].text).toBe('Connected to Slack.');
+      expect(result.content[0].text).toBe(
+        'Connected to Slack. (Permission relay requires the `--dangerously-load-development-channels` flag.)',
+      );
     });
 
     test('catches LockHeldError, IPC succeeds → sets client mode', async () => {
@@ -1092,7 +1094,7 @@ describe('connect tool', () => {
       });
       expect(getMode()).toBe('client');
       expect(result.content[0].text).toBe(
-        'Connected as client \u2014 messages and permissions relay through the active session. You have your own thread.',
+        'Connected as client \u2014 messages and permissions relay through the active session. You have your own thread. (Permission relay requires the `--dangerously-load-development-channels` flag.)',
       );
       // Clean up
       ipcConnectBehavior = 'fail';

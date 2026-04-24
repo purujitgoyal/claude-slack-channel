@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   CallToolRequestSchema,
@@ -10,6 +11,7 @@ import {
   getSessionLabel,
   log,
   SOCKET_PATH,
+  setProjectDir,
   textResult,
 } from './config.ts';
 import { IPCClient } from './ipc.ts';
@@ -171,6 +173,73 @@ export const mcp = new Server(
 );
 
 // ---------------------------------------------------------------------------
+// Client snapshot — captured on `initialize`, consulted by the trust probe.
+// Host trust gates delivery of notifications/claude/channel/*; sessions without
+// trust receive nothing and silently degrade to CC's terminal perm UI. The
+// snapshot lets us log what the host announced and (in Phase 2) warn the user.
+// ---------------------------------------------------------------------------
+
+let clientInfoSnapshot: ReturnType<typeof mcp.getClientVersion>;
+let clientCapabilitiesSnapshot: ReturnType<typeof mcp.getClientCapabilities>;
+
+export function getClientInfoSnapshot() {
+  return clientInfoSnapshot;
+}
+
+export function getClientCapabilitiesSnapshot() {
+  return clientCapabilitiesSnapshot;
+}
+
+mcp.oninitialized = () => {
+  clientInfoSnapshot = mcp.getClientVersion();
+  clientCapabilitiesSnapshot = mcp.getClientCapabilities();
+  log(`clientInfo: ${JSON.stringify(clientInfoSnapshot)}`);
+  log(`clientCapabilities: ${JSON.stringify(clientCapabilitiesSnapshot)}`);
+
+  // Fire-and-forget: when the client advertises `roots`, derive the session
+  // label from the user's workspace root. `process.cwd()` here is the plugin
+  // install dir (see config.ts setProjectDir comment). There is a small race
+  // window between oninitialized and the first tool call; if getSessionLabel()
+  // is called before listRoots() resolves, it falls back to cwd — same as
+  // today's behavior, no regression.
+  if (clientCapabilitiesSnapshot?.roots) {
+    mcp
+      .listRoots()
+      .then((result) => {
+        const first = result.roots?.[0];
+        if (!first) {
+          log('listRoots returned no roots — label will fall back to cwd');
+          return;
+        }
+        try {
+          const fsPath = fileURLToPath(first.uri);
+          setProjectDir(fsPath);
+          log(`projectDir set from roots: ${fsPath}`);
+        } catch (err) {
+          log(`failed to parse root URI ${first.uri}: ${err}`);
+        }
+      })
+      .catch((err) => log(`listRoots failed: ${err}`));
+  }
+};
+
+// Catch-all for claude/channel/* notifications we don't explicitly handle.
+// Filter is narrow to avoid flooding the log with routine MCP chatter
+// (progress, message, etc.); widen later if empirical data shows the perm
+// notification arrives under a different method name.
+mcp.fallbackNotificationHandler = async (notification) => {
+  if (notification.method.startsWith('notifications/claude/channel/')) {
+    const paramsPreview = JSON.stringify(notification.params ?? {}).slice(
+      0,
+      200,
+    );
+    log(
+      `unhandled channel notification: ${notification.method} ${paramsPreview}`,
+    );
+  }
+};
+
+// ---------------------------------------------------------------------------
 // MCP tools — empty when dormant, populated when channel is active
 // ---------------------------------------------------------------------------
 
@@ -252,6 +321,14 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [CONNECT_TOOL, DISCONNECT_TOOL, ...CHANNEL_TOOLS],
 }));
 
+// Appended to fresh-connect responses to surface the host-side trust gate.
+// CC delivers notifications/claude/channel/* (including permission_request)
+// only when the session was launched with --dangerously-load-development-channels,
+// and the capability handshake exposes no signal — so this note is the only
+// way the plugin can communicate the requirement at connect time.
+const TRUST_NOTE =
+  '(Permission relay requires the `--dangerously-load-development-channels` flag.)';
+
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'connect') {
     if (getMode() === 'connected') return textResult('Already connected.');
@@ -260,7 +337,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     if (!injectedActivate) throw new Error('activate function not set');
     try {
       await injectedActivate();
-      return textResult('Connected to Slack.');
+      return textResult(`Connected to Slack. ${TRUST_NOTE}`);
     } catch (err) {
       if (err instanceof LockHeldError) {
         try {
@@ -312,7 +389,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           ipcClient = client;
           setMode('client');
           return textResult(
-            'Connected as client \u2014 messages and permissions relay through the active session. You have your own thread.',
+            `Connected as client \u2014 messages and permissions relay through the active session. You have your own thread. ${TRUST_NOTE}`,
           );
         } catch (ipcErr) {
           log(`IPC connect failed: ${ipcErr}`);
@@ -429,16 +506,29 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   const { request_id, tool_name, description, input_preview } = params;
 
   // ── Dormant mode: silently ignore — CC falls back to terminal ──
-  if (getMode() === 'dormant') return;
+  if (getMode() === 'dormant') {
+    log(
+      `perm_request ${request_id} (${tool_name}) dropped — session is dormant (call connect)`,
+    );
+    return;
+  }
 
   // ── Client mode: forward over IPC to the connected session ──
   if (getMode() === 'client') {
-    if (!ipcClient) return; // relay lost — CC falls back to terminal
+    if (!ipcClient) {
+      log(
+        `perm_request ${request_id} (${tool_name}) dropped — IPC client lost, CC will fall back to terminal`,
+      );
+      return;
+    }
     ipcClient.sendPermRequest(
       request_id,
       tool_name,
       description,
       input_preview,
+    );
+    log(
+      `perm_request ${request_id} (${tool_name}) forwarded to primary over IPC`,
     );
     return;
   }

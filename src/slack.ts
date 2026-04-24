@@ -1,6 +1,11 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { App } from '@slack/bolt';
-import { codePreviewBlock, log, stripMentions } from './config.ts';
+import {
+  buildChannelNotification,
+  codePreviewBlock,
+  log,
+  stripMentions,
+} from './config.ts';
 import type { InboundMessage as IpcInboundMessage } from './ipc.ts';
 import { routeVerdict } from './ipc.ts';
 import {
@@ -17,17 +22,17 @@ import {
 // Module state — populated by startSlack()
 // ---------------------------------------------------------------------------
 
+export interface IpcBridge {
+  findClientByThread(ts: string): string | null;
+  evictClient(sessionId: string): void;
+  forwardToClient(sessionId: string, msg: IpcInboundMessage): boolean;
+  listClientThreads(): Array<{ sessionId: string; threadTs: string }>;
+}
+
 let bolt: App | null = null;
 let channelId = '';
 let allowedUserId = '';
-let findClientByThread: ((ts: string) => string | null) | undefined;
-let evictClient: ((sessionId: string) => void) | undefined;
-let forwardToClient:
-  | ((sessionId: string, msg: IpcInboundMessage) => boolean)
-  | undefined;
-let listClientThreads:
-  | (() => Array<{ sessionId: string; threadTs: string }>)
-  | undefined;
+let ipcBridge: IpcBridge | null = null;
 let cleanupMonitor: (() => void) | null = null;
 let botUserId: string | null = null;
 
@@ -45,12 +50,9 @@ export function resetBotUserId(): void {
   botUserId = null;
 }
 
-/** Resets IPC callback refs — test-only, used in afterEach to prevent cross-test state leakage. */
-export function resetIpcCallbacks(): void {
-  findClientByThread = undefined;
-  evictClient = undefined;
-  forwardToClient = undefined;
-  listClientThreads = undefined;
+/** Resets the IPC bridge ref — test-only, used in afterEach to prevent cross-test state leakage. */
+export function resetIpcBridge(): void {
+  ipcBridge = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,17 +165,13 @@ async function forwardInboundMessage(
 ): Promise<string> {
   switch (msg.type) {
     case 'thread_reply': {
-      await mcp.notification({
-        method: 'notifications/claude/channel',
-        params: {
-          content: msg.text,
-          meta: {
-            slack_user_id: msg.userId,
-            channel_id: channelId,
-            event_ts: msg.eventTs,
-          },
-        },
-      });
+      await mcp.notification(
+        buildChannelNotification(msg.text, {
+          userId: msg.userId,
+          channelId,
+          eventTs: msg.eventTs,
+        }),
+      );
       log('forwarded thread reply to Claude');
       return msg.eventTs;
     }
@@ -187,17 +185,13 @@ async function forwardInboundMessage(
       });
       log(`app_mention — new thread rooted at ${msg.eventTs}`);
 
-      await mcp.notification({
-        method: 'notifications/claude/channel',
-        params: {
-          content: msg.text || '(new session)',
-          meta: {
-            slack_user_id: msg.userId,
-            channel_id: channelId,
-            event_ts: msg.eventTs,
-          },
-        },
-      });
+      await mcp.notification(
+        buildChannelNotification(msg.text || '(new session)', {
+          userId: msg.userId,
+          channelId,
+          eventTs: msg.eventTs,
+        }),
+      );
       log('forwarded app_mention to Claude');
       return msg.eventTs;
     }
@@ -218,17 +212,12 @@ async function forwardInboundMessage(
       saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
 
       // Forward to Claude with old thread context
-      await mcp.notification({
-        method: 'notifications/claude/channel',
-        params: {
-          content: `[Context from previous thread]\n${summary}\n\n[New message]\n${msg.text}`,
-          meta: {
-            slack_user_id: msg.userId,
-            channel_id: channelId,
-            event_ts: msg.eventTs,
-          },
-        },
-      });
+      await mcp.notification(
+        buildChannelNotification(
+          `[Context from previous thread]\n${summary}\n\n[New message]\n${msg.text}`,
+          { userId: msg.userId, channelId, eventTs: msg.eventTs },
+        ),
+      );
       log('forwarded old thread reply with summary to Claude');
       return msg.eventTs;
     }
@@ -248,6 +237,31 @@ async function forwardInboundMessage(
 function isDuplicate(eventTs: string): boolean {
   const lastSeen = getLastSeenEventTs();
   return lastSeen !== null && eventTs <= lastSeen;
+}
+
+/**
+ * Attempts to deliver an inbound message to the IPC client that owns `sessionId`.
+ * Returns true on successful delivery, false if the bridge is unwired or the
+ * client socket is dead. On false, the caller is responsible for eviction and
+ * the old_thread_reply fallback.
+ */
+function routeToClientThread(
+  sessionId: string,
+  msg: { text: string; eventTs: string; userId: string },
+): boolean {
+  if (!ipcBridge) return false;
+  const envelope: IpcInboundMessage = {
+    type: 'inbound_message',
+    text: msg.text,
+    eventTs: msg.eventTs,
+    userId: msg.userId,
+    channelId,
+  };
+  try {
+    return ipcBridge.forwardToClient(sessionId, envelope);
+  } catch {
+    return false;
+  }
 }
 
 function registerBoltHandlers(mcp: Server) {
@@ -286,35 +300,19 @@ function registerBoltHandlers(mcp: Server) {
         userId: msg.user ?? '',
       });
     } else {
-      const sessionId = findClientByThread?.(threadTs) ?? null;
-      if (sessionId !== null) {
-        // Client-thread reply — forward to the owning IPC client
-        const envelope: IpcInboundMessage = {
-          type: 'inbound_message',
+      const sessionId = ipcBridge?.findClientByThread(threadTs) ?? null;
+      const delivered =
+        sessionId !== null &&
+        routeToClientThread(sessionId, {
           text,
           eventTs,
           userId: msg.user ?? '',
-          channelId,
-        };
-        let delivered = false;
-        try {
-          delivered = forwardToClient!(sessionId, envelope);
-        } catch {
-          delivered = false;
+        });
+      if (!delivered) {
+        if (sessionId !== null) {
+          // Client socket is dead — evict before falling back
+          ipcBridge?.evictClient(sessionId);
         }
-        if (!delivered) {
-          // Client socket is dead — evict and fall back to old-thread-reply
-          evictClient!(sessionId);
-          await forwardInboundMessage(mcp, {
-            type: 'old_thread_reply',
-            text,
-            eventTs,
-            userId: msg.user ?? '',
-            oldThreadTs: threadTs,
-          });
-        }
-      } else {
-        // Old thread reply — fetch summary, start new thread, forward with context
         await forwardInboundMessage(mcp, {
           type: 'old_thread_reply',
           text,
@@ -697,17 +695,11 @@ export async function startSlack(opts: {
   channelId: string;
   allowedUserId: string;
   onDead: () => void;
-  findClientByThread?: (ts: string) => string | null;
-  evictClient?: (sessionId: string) => void;
-  forwardToClient?: (sessionId: string, msg: IpcInboundMessage) => boolean;
-  listClientThreads?: () => Array<{ sessionId: string; threadTs: string }>;
+  ipc?: IpcBridge;
 }): Promise<App> {
   channelId = opts.channelId;
   allowedUserId = opts.allowedUserId;
-  findClientByThread = opts.findClientByThread;
-  evictClient = opts.evictClient;
-  forwardToClient = opts.forwardToClient;
-  listClientThreads = opts.listClientThreads;
+  ipcBridge = opts.ipc ?? null;
 
   bolt = new App({
     token: opts.botToken,
@@ -811,7 +803,7 @@ async function fetchAllSources(
 
   // Per-client-thread replies in parallel. Wrapped as { msg, sessionId } so
   // each message carries its routing origin without mutating Slack shape.
-  const clientThreadEntries = listClientThreads?.() ?? [];
+  const clientThreadEntries = ipcBridge?.listClientThreads() ?? [];
   const clientRepliesTagged: Array<{ msg: any; sessionId: string }> = [];
   if (clientThreadEntries.length > 0) {
     const fetches = clientThreadEntries.map(async ({ sessionId, threadTs }) => {
@@ -935,30 +927,15 @@ async function dispatchItem(
     if (item.kind === 'client') {
       const sessionId = item.sessionId;
 
-      // Graceful degradation: if IPC callbacks aren't wired, treat the client
-      // as dead and fall back to old_thread_reply on primary.
-      if (!forwardToClient || !evictClient) {
-        await sendOldThreadReply();
-        return 'delivered';
-      }
-
-      const envelope: IpcInboundMessage = {
-        type: 'inbound_message',
+      const delivered = routeToClientThread(sessionId, {
         text,
         eventTs: ts,
         userId,
-        channelId,
-      };
-      let delivered = false;
-      try {
-        delivered = forwardToClient(sessionId, envelope);
-      } catch {
-        delivered = false;
-      }
+      });
       if (delivered) return 'delivered';
 
-      // Client socket is dead — evict and fall back to old_thread_reply.
-      evictClient(sessionId);
+      // Bridge unwired or client socket dead — evict (if possible) and fall back.
+      ipcBridge?.evictClient(sessionId);
       await sendOldThreadReply();
       return 'delivered';
     }

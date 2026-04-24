@@ -31,6 +31,29 @@ export function stripMentions(text: string): string {
   return text.replace(MENTION_RE, '').trim();
 }
 
+/**
+ * Builds the `notifications/claude/channel` payload for a user-originated
+ * message. Shared by forwardInboundMessage in src/slack.ts and the IPC
+ * onInboundMessage callback in src/mcp.ts to prevent drift between the two
+ * paths.
+ */
+export function buildChannelNotification(
+  content: string,
+  meta: { userId: string; channelId: string; eventTs: string },
+) {
+  return {
+    method: 'notifications/claude/channel' as const,
+    params: {
+      content,
+      meta: {
+        slack_user_id: meta.userId,
+        channel_id: meta.channelId,
+        event_ts: meta.eventTs,
+      },
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Format raw JSON input_preview into a readable one-liner for confirmations
 // ---------------------------------------------------------------------------

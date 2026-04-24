@@ -77,13 +77,8 @@ mock.module('@slack/bolt', () => {
 // Import modules under test
 // ---------------------------------------------------------------------------
 
-const {
-  startSlack,
-  stopSlack,
-  getBotUserId,
-  resetBotUserId,
-  resetIpcCallbacks,
-} = await import('../src/slack');
+const { startSlack, stopSlack, getBotUserId, resetBotUserId, resetIpcBridge } =
+  await import('../src/slack');
 const {
   setActiveThreadTs,
   getActiveThreadTs,
@@ -158,7 +153,7 @@ describe('Bolt Handlers', () => {
     setActiveServer(null);
     await stopSlack();
     resetBotUserId();
-    resetIpcCallbacks();
+    resetIpcBridge();
   });
 
   // =========================================================================
@@ -1004,20 +999,22 @@ describe('Bolt Handlers', () => {
   // IPC callbacks wiring
   // =========================================================================
 
-  describe('startSlack IPC callback opts', () => {
-    // Guards only the type contract — that startSlack's opts accepts the
-    // three IPC callbacks without runtime errors.
-    test('accepts findClientByThread, evictClient, forwardToClient in opts', async () => {
+  describe('startSlack IPC bridge opt', () => {
+    // Guards only the type contract — that startSlack's opts accepts an
+    // IpcBridge without runtime errors.
+    test('accepts an IpcBridge in opts.ipc', async () => {
       await stopSlack();
       resetBotUserId();
 
-      const findClientByThread = mock((ts: string): string | null => null);
-      const evictClient = mock((sessionId: string): void => {});
+      const findClientByThread = mock((_ts: string): string | null => null);
+      const evictClient = mock((_sessionId: string): void => {});
       const forwardToClient = mock(
-        (sessionId: string, msg: any): boolean => false,
+        (_sessionId: string, _msg: any): boolean => false,
+      );
+      const listClientThreads = mock(
+        () => [] as Array<{ sessionId: string; threadTs: string }>,
       );
 
-      // Should not throw — these opts must be accepted by the type and assigned
       await startSlack({
         mcp: mcpMock as any,
         botToken: TEST_BOT_TOKEN,
@@ -1025,12 +1022,14 @@ describe('Bolt Handlers', () => {
         channelId: TEST_CHANNEL_ID,
         allowedUserId: TEST_ALLOWED_USER,
         onDead: () => {},
-        findClientByThread,
-        evictClient,
-        forwardToClient,
+        ipc: {
+          findClientByThread,
+          evictClient,
+          forwardToClient,
+          listClientThreads,
+        },
       });
 
-      // Callbacks are accepted and stored — no errors thrown above
       expect(findClientByThread).not.toHaveBeenCalled();
       expect(evictClient).not.toHaveBeenCalled();
       expect(forwardToClient).not.toHaveBeenCalled();
@@ -1042,7 +1041,7 @@ describe('Bolt Handlers', () => {
   // =========================================================================
 
   describe('client thread reply routing', () => {
-    // Helper: restart startSlack with IPC callbacks wired
+    // Helper: restart startSlack with an IPC bridge wired
     async function startSlackWithIpc(opts: {
       findClientByThread: (ts: string) => string | null;
       evictClient: (sessionId: string) => void;
@@ -1057,9 +1056,12 @@ describe('Bolt Handlers', () => {
         channelId: TEST_CHANNEL_ID,
         allowedUserId: TEST_ALLOWED_USER,
         onDead: () => {},
-        findClientByThread: opts.findClientByThread,
-        evictClient: opts.evictClient,
-        forwardToClient: opts.forwardToClient,
+        ipc: {
+          findClientByThread: opts.findClientByThread,
+          evictClient: opts.evictClient,
+          forwardToClient: opts.forwardToClient,
+          listClientThreads: () => [],
+        },
       });
     }
 

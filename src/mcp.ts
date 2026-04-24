@@ -6,6 +6,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import {
+  buildChannelNotification,
   buildPermissionBlocks,
   formatInputPreview,
   getSessionLabel,
@@ -328,17 +329,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             },
             onInboundMessage: (text, eventTs, userId, channelId) => {
               mcp
-                .notification({
-                  method: 'notifications/claude/channel',
-                  params: {
-                    content: text,
-                    meta: {
-                      slack_user_id: userId,
-                      channel_id: channelId,
-                      event_ts: eventTs,
-                    },
-                  },
-                })
+                .notification(
+                  buildChannelNotification(text, {
+                    userId,
+                    channelId,
+                    eventTs,
+                  }),
+                )
                 .catch((err) =>
                   log(`failed to forward inbound message via MCP: ${err}`),
                 );

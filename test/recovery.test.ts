@@ -93,7 +93,7 @@ const {
   startSlack,
   stopSlack,
   resetBotUserId,
-  resetIpcCallbacks,
+  resetIpcBridge,
   recoverMissedMessages,
 } = await import('../src/slack');
 const { setActiveThreadTs, setLastSeenEventTs, getLastSeenEventTs } =
@@ -431,7 +431,7 @@ describe('recoverMissedMessages — client-thread recovery', () => {
   beforeEach(async () => {
     // Stop the app started by the outer beforeEach
     await stopSlack();
-    resetIpcCallbacks();
+    resetIpcBridge();
 
     forwardToClientMock = mock((_sid: string, _msg: any): boolean => true);
     evictClientMock = mock((_sid: string): void => {});
@@ -453,9 +453,12 @@ describe('recoverMissedMessages — client-thread recovery', () => {
       channelId: TEST_CHANNEL_ID,
       allowedUserId: TEST_ALLOWED_USER,
       onDead: () => {},
-      forwardToClient: forwardToClientMock as any,
-      evictClient: evictClientMock as any,
-      listClientThreads: listClientThreadsMock as any,
+      ipc: {
+        findClientByThread: () => null,
+        forwardToClient: forwardToClientMock as any,
+        evictClient: evictClientMock as any,
+        listClientThreads: listClientThreadsMock as any,
+      },
     });
 
     setActiveThreadTs(TEST_PRIMARY_THREAD);
@@ -544,7 +547,7 @@ describe('recoverMissedMessages — client-thread recovery', () => {
 
     // Restart with the failing forwardToClient
     await stopSlack();
-    resetIpcCallbacks();
+    resetIpcBridge();
     mcpMock = { notification: mock(async () => {}) };
     await startSlack({
       mcp: mcpMock as any,
@@ -553,9 +556,12 @@ describe('recoverMissedMessages — client-thread recovery', () => {
       channelId: TEST_CHANNEL_ID,
       allowedUserId: TEST_ALLOWED_USER,
       onDead: () => {},
-      forwardToClient: forwardToClientMock as any,
-      evictClient: evictClientMock as any,
-      listClientThreads: listClientThreadsMock as any,
+      ipc: {
+        findClientByThread: () => null,
+        forwardToClient: forwardToClientMock as any,
+        evictClient: evictClientMock as any,
+        listClientThreads: listClientThreadsMock as any,
+      },
     });
     setActiveThreadTs(TEST_PRIMARY_THREAD);
     setLastSeenEventTs(null);
@@ -612,7 +618,7 @@ describe('recoverMissedMessages — client-thread recovery', () => {
 
     // Restart with no clients
     await stopSlack();
-    resetIpcCallbacks();
+    resetIpcBridge();
     mcpMock = { notification: mock(async () => {}) };
     await startSlack({
       mcp: mcpMock as any,
@@ -621,9 +627,12 @@ describe('recoverMissedMessages — client-thread recovery', () => {
       channelId: TEST_CHANNEL_ID,
       allowedUserId: TEST_ALLOWED_USER,
       onDead: () => {},
-      forwardToClient: forwardToClientMock as any,
-      evictClient: evictClientMock as any,
-      listClientThreads: listClientThreadsMock as any,
+      ipc: {
+        findClientByThread: () => null,
+        forwardToClient: forwardToClientMock as any,
+        evictClient: evictClientMock as any,
+        listClientThreads: listClientThreadsMock as any,
+      },
     });
     setActiveThreadTs(TEST_PRIMARY_THREAD);
     setLastSeenEventTs(null);
@@ -677,14 +686,13 @@ describe('recoverMissedMessages — client-thread recovery', () => {
   });
 
   // =========================================================================
-  // Guard test: listClientThreads wired but forwardToClient/evictClient missing
-  // → gracefully fall back to old_thread_reply on primary (no TypeError thrown)
+  // Guard test: bridge not wired at all → recovery has no client threads to
+  // consult, client-thread replies simply aren't fetched, primary path runs.
   // =========================================================================
 
-  test('falls back gracefully when listClientThreads is wired but forwardToClient/evictClient are not', async () => {
-    // Restart with ONLY listClientThreads wired — no forwardToClient, no evictClient
+  test('recovery runs without client-thread fetch when no IPC bridge is wired', async () => {
     await stopSlack();
-    resetIpcCallbacks();
+    resetIpcBridge();
     mcpMock = { notification: mock(async () => {}) };
     await startSlack({
       mcp: mcpMock as any,
@@ -693,35 +701,14 @@ describe('recoverMissedMessages — client-thread recovery', () => {
       channelId: TEST_CHANNEL_ID,
       allowedUserId: TEST_ALLOWED_USER,
       onDead: () => {},
-      listClientThreads: listClientThreadsMock as any,
-      // forwardToClient and evictClient intentionally omitted
+      // No ipc bridge — mirrors legacy primary-only wiring
     });
     setActiveThreadTs(TEST_PRIMARY_THREAD);
     setLastSeenEventTs(null);
     mcpMock.notification.mockClear();
 
-    const clientReplyTs = '1775644620.400000';
-
     historyMock.mockResolvedValue({ ok: true, messages: [] });
-    repliesMock
-      .mockResolvedValueOnce({ ok: true, messages: [] }) // primary: no replies
-      .mockResolvedValueOnce({
-        ok: true,
-        messages: [
-          {
-            user: TEST_ALLOWED_USER,
-            text: 'client parent',
-            ts: TEST_CLIENT_THREAD,
-            thread_ts: TEST_CLIENT_THREAD,
-          },
-          {
-            user: TEST_ALLOWED_USER,
-            text: 'client reply with no ipc wiring',
-            ts: clientReplyTs,
-            thread_ts: TEST_CLIENT_THREAD,
-          },
-        ],
-      });
+    repliesMock.mockResolvedValueOnce({ ok: true, messages: [] });
 
     let threw = false;
     try {
@@ -730,15 +717,10 @@ describe('recoverMissedMessages — client-thread recovery', () => {
       threw = true;
     }
 
-    // Must not throw TypeError from non-null assertions
     expect(threw).toBe(false);
-
-    // Falls back to primary old_thread_reply path
-    expect(mcpMock.notification).toHaveBeenCalledTimes(1);
-    const notifParams = mcpMock.notification.mock.calls[0][0].params;
-    expect(notifParams.meta.event_ts).toBe(clientReplyTs);
-
-    // Cursor advanced
-    expect(getLastSeenEventTs()).toBe(clientReplyTs);
+    // Only primary replies fetched — no client-thread fetch attempted.
+    expect(repliesMock).toHaveBeenCalledTimes(1);
+    expect(forwardToClientMock).not.toHaveBeenCalled();
+    expect(evictClientMock).not.toHaveBeenCalled();
   });
 });

@@ -302,9 +302,7 @@ function registerBoltHandlers(mcp: Server) {
         } catch {
           delivered = false;
         }
-        if (delivered) {
-          // fall through to single cursor-advancement below
-        } else {
+        if (!delivered) {
           // Client socket is dead — evict and fall back to old-thread-reply
           evictClient!(sessionId);
           await forwardInboundMessage(mcp, {

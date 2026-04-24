@@ -172,37 +172,14 @@ export const mcp = new Server(
   },
 );
 
-// ---------------------------------------------------------------------------
-// Client snapshot — captured on `initialize`, consulted by the trust probe.
-// Host trust gates delivery of notifications/claude/channel/*; sessions without
-// trust receive nothing and silently degrade to CC's terminal perm UI. The
-// snapshot lets us log what the host announced and (in Phase 2) warn the user.
-// ---------------------------------------------------------------------------
-
-let clientInfoSnapshot: ReturnType<typeof mcp.getClientVersion>;
-let clientCapabilitiesSnapshot: ReturnType<typeof mcp.getClientCapabilities>;
-
-export function getClientInfoSnapshot() {
-  return clientInfoSnapshot;
-}
-
-export function getClientCapabilitiesSnapshot() {
-  return clientCapabilitiesSnapshot;
-}
-
 mcp.oninitialized = () => {
-  clientInfoSnapshot = mcp.getClientVersion();
-  clientCapabilitiesSnapshot = mcp.getClientCapabilities();
-  log(`clientInfo: ${JSON.stringify(clientInfoSnapshot)}`);
-  log(`clientCapabilities: ${JSON.stringify(clientCapabilitiesSnapshot)}`);
+  const clientInfo = mcp.getClientVersion();
+  const clientCapabilities = mcp.getClientCapabilities();
+  log(`clientInfo: ${JSON.stringify(clientInfo)}`);
+  log(`clientCapabilities: ${JSON.stringify(clientCapabilities)}`);
 
-  // Fire-and-forget: when the client advertises `roots`, derive the session
-  // label from the user's workspace root. `process.cwd()` here is the plugin
-  // install dir (see config.ts setProjectDir comment). There is a small race
-  // window between oninitialized and the first tool call; if getSessionLabel()
-  // is called before listRoots() resolves, it falls back to cwd — same as
-  // today's behavior, no regression.
-  if (clientCapabilitiesSnapshot?.roots) {
+  // cwd here is the plugin install dir; set projectDir from roots when available.
+  if (clientCapabilities?.roots) {
     mcp
       .listRoots()
       .then((result) => {
@@ -223,10 +200,8 @@ mcp.oninitialized = () => {
   }
 };
 
-// Catch-all for claude/channel/* notifications we don't explicitly handle.
-// Filter is narrow to avoid flooding the log with routine MCP chatter
-// (progress, message, etc.); widen later if empirical data shows the perm
-// notification arrives under a different method name.
+// Catch-all for unhandled claude/channel/* notifications. Filter is narrow
+// to avoid logging routine MCP chatter (progress, message, etc.).
 mcp.fallbackNotificationHandler = async (notification) => {
   if (notification.method.startsWith('notifications/claude/channel/')) {
     const paramsPreview = JSON.stringify(notification.params ?? {}).slice(
@@ -521,15 +496,21 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
       );
       return;
     }
-    ipcClient.sendPermRequest(
-      request_id,
-      tool_name,
-      description,
-      input_preview,
-    );
-    log(
-      `perm_request ${request_id} (${tool_name}) forwarded to primary over IPC`,
-    );
+    try {
+      ipcClient.sendPermRequest(
+        request_id,
+        tool_name,
+        description,
+        input_preview,
+      );
+      log(
+        `perm_request ${request_id} (${tool_name}) forwarded to primary over IPC`,
+      );
+    } catch (err) {
+      log(
+        `perm_request ${request_id} (${tool_name}) IPC forward failed: ${err} — CC will fall back to terminal`,
+      );
+    }
     return;
   }
 

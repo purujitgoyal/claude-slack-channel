@@ -1005,8 +1005,8 @@ describe('Bolt Handlers', () => {
   // =========================================================================
 
   describe('startSlack IPC callback opts', () => {
-    // Behavior verification deferred to Task 7 — this test guards only the
-    // type contract (that startSlack's opts accepts the three IPC callbacks).
+    // Guards only the type contract — that startSlack's opts accepts the
+    // three IPC callbacks without runtime errors.
     test('accepts findClientByThread, evictClient, forwardToClient in opts', async () => {
       await stopSlack();
       resetBotUserId();
@@ -1038,7 +1038,7 @@ describe('Bolt Handlers', () => {
   });
 
   // =========================================================================
-  // Client-thread inbound routing (Task 7)
+  // Client-thread inbound routing
   // =========================================================================
 
   describe('client thread reply routing', () => {

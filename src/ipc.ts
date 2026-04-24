@@ -610,8 +610,7 @@ export class IPCServer {
     }
   }
 
-  /** Evict a client by sessionId: remove from maps, clean up perm routing, optionally post disconnect notice.
-   *  Idempotent: if the client is already removed, this is a no-op. */
+  /** Idempotent: no-op if the client is already removed. */
   evictClient(
     sessionId: string,
     opts: { intentional: boolean; postNotice: boolean },
@@ -654,8 +653,6 @@ export class IPCServer {
     }
   }
 
-  /** Socket-level close handler — extracts sessionId/intentionalClose from socket.data
-   *  and delegates to evictClient. */
   private handleClose(socket: BunSocket<SocketContext>): void {
     const sessionId = socket.data?.sessionId;
     if (!sessionId) return;

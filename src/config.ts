@@ -127,12 +127,8 @@ export const SESSION_PATH = join(CHANNELS_DIR, 'session.json');
 export const LOCK_PATH = join(CHANNELS_DIR, 'server.lock');
 export const SOCKET_PATH = join(CHANNELS_DIR, 'primary.sock');
 
-// Project directory, set from the MCP `roots/list` response when the client
-// advertises the roots capability. `process.cwd()` in an MCP plugin subprocess
-// is the plugin install dir (version-bucketed, not the user's workspace), so
-// naked cwd produces labels like "0.9.0". When unset, we fall back to cwd —
-// same behavior as before this seam existed; the fix just opts-in when the
-// host provides the signal.
+// cwd in an MCP plugin subprocess is the plugin install dir, not the user's
+// workspace — so naked cwd produces labels like "0.9.0". Set from MCP roots when available.
 let projectDir: string | null = null;
 
 export function setProjectDir(dir: string | null): void {

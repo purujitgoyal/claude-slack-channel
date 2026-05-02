@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   CallToolRequestSchema,
@@ -5,11 +6,13 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import {
+  buildChannelNotification,
   buildPermissionBlocks,
   formatInputPreview,
   getSessionLabel,
   log,
   SOCKET_PATH,
+  setProjectDir,
   textResult,
 } from './config.ts';
 import { IPCClient } from './ipc.ts';
@@ -157,7 +160,7 @@ Always call connect. The response tells you which mode you're in.
 `.trim();
 
 export const mcp = new Server(
-  { name: 'slack-channel', version: '0.9.0' },
+  { name: 'slack-channel', version: '0.10.0' },
   {
     capabilities: {
       experimental: {
@@ -169,6 +172,48 @@ export const mcp = new Server(
     instructions: INSTRUCTIONS,
   },
 );
+
+mcp.oninitialized = () => {
+  const clientInfo = mcp.getClientVersion();
+  const clientCapabilities = mcp.getClientCapabilities();
+  log(`clientInfo: ${JSON.stringify(clientInfo)}`);
+  log(`clientCapabilities: ${JSON.stringify(clientCapabilities)}`);
+
+  // cwd here is the plugin install dir; set projectDir from roots when available.
+  if (clientCapabilities?.roots) {
+    mcp
+      .listRoots()
+      .then((result) => {
+        const first = result.roots?.[0];
+        if (!first) {
+          log('listRoots returned no roots — label will fall back to cwd');
+          return;
+        }
+        try {
+          const fsPath = fileURLToPath(first.uri);
+          setProjectDir(fsPath);
+          log(`projectDir set from roots: ${fsPath}`);
+        } catch (err) {
+          log(`failed to parse root URI ${first.uri}: ${err}`);
+        }
+      })
+      .catch((err) => log(`listRoots failed: ${err}`));
+  }
+};
+
+// Catch-all for unhandled claude/channel/* notifications. Filter is narrow
+// to avoid logging routine MCP chatter (progress, message, etc.).
+mcp.fallbackNotificationHandler = async (notification) => {
+  if (notification.method.startsWith('notifications/claude/channel/')) {
+    const paramsPreview = JSON.stringify(notification.params ?? {}).slice(
+      0,
+      200,
+    );
+    log(
+      `unhandled channel notification: ${notification.method} ${paramsPreview}`,
+    );
+  }
+};
 
 // ---------------------------------------------------------------------------
 // MCP tools — empty when dormant, populated when channel is active
@@ -252,6 +297,14 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [CONNECT_TOOL, DISCONNECT_TOOL, ...CHANNEL_TOOLS],
 }));
 
+// Appended to fresh-connect responses to surface the host-side trust gate.
+// CC delivers notifications/claude/channel/* (including permission_request)
+// only when the session was launched with --dangerously-load-development-channels,
+// and the capability handshake exposes no signal — so this note is the only
+// way the plugin can communicate the requirement at connect time.
+const TRUST_NOTE =
+  '(Permission relay requires the `--dangerously-load-development-channels` flag.)';
+
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'connect') {
     if (getMode() === 'connected') return textResult('Already connected.');
@@ -260,7 +313,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     if (!injectedActivate) throw new Error('activate function not set');
     try {
       await injectedActivate();
-      return textResult('Connected to Slack.');
+      return textResult(`Connected to Slack. ${TRUST_NOTE}`);
     } catch (err) {
       if (err instanceof LockHeldError) {
         try {
@@ -273,6 +326,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
                 method: 'notifications/claude/channel/permission',
                 params: { request_id: requestId, behavior },
               });
+            },
+            onInboundMessage: (text, eventTs, userId, channelId) => {
+              mcp
+                .notification(
+                  buildChannelNotification(text, {
+                    userId,
+                    channelId,
+                    eventTs,
+                  }),
+                )
+                .catch((err) =>
+                  log(`failed to forward inbound message via MCP: ${err}`),
+                );
             },
             onDisconnect: ({ graceful }) => {
               ipcClient = null;
@@ -295,7 +361,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           ipcClient = client;
           setMode('client');
           return textResult(
-            'Connected as client \u2014 messages and permissions relay through the active session. You have your own thread.',
+            `Connected as client \u2014 messages and permissions relay through the active session. You have your own thread. ${TRUST_NOTE}`,
           );
         } catch (ipcErr) {
           log(`IPC connect failed: ${ipcErr}`);
@@ -412,17 +478,36 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   const { request_id, tool_name, description, input_preview } = params;
 
   // ── Dormant mode: silently ignore — CC falls back to terminal ──
-  if (getMode() === 'dormant') return;
+  if (getMode() === 'dormant') {
+    log(
+      `perm_request ${request_id} (${tool_name}) dropped — session is dormant (call connect)`,
+    );
+    return;
+  }
 
   // ── Client mode: forward over IPC to the connected session ──
   if (getMode() === 'client') {
-    if (!ipcClient) return; // relay lost — CC falls back to terminal
-    ipcClient.sendPermRequest(
-      request_id,
-      tool_name,
-      description,
-      input_preview,
-    );
+    if (!ipcClient) {
+      log(
+        `perm_request ${request_id} (${tool_name}) dropped — IPC client lost, CC will fall back to terminal`,
+      );
+      return;
+    }
+    try {
+      ipcClient.sendPermRequest(
+        request_id,
+        tool_name,
+        description,
+        input_preview,
+      );
+      log(
+        `perm_request ${request_id} (${tool_name}) forwarded to primary over IPC`,
+      );
+    } catch (err) {
+      log(
+        `perm_request ${request_id} (${tool_name}) IPC forward failed: ${err} — CC will fall back to terminal`,
+      );
+    }
     return;
   }
 

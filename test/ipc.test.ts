@@ -13,6 +13,7 @@ import type { IPCMessage, ServerMessage } from '../src/ipc';
 import {
   encode,
   IPCClient,
+  IPCMessageSchema,
   IPCServer,
   LineBuffer,
   routeVerdict,
@@ -1216,6 +1217,118 @@ describe('IPCServer client disconnect cleanup', () => {
   });
 });
 
+// ── evictClient idempotency Tests ─────────────────────────────────────────
+
+describe('evictClient', () => {
+  let server: IPCServer;
+  let sockPath: string;
+  let posterMock: ReturnType<typeof mock>;
+  let messageUpdaterMock: ReturnType<typeof mock>;
+  let reacterMock: ReturnType<typeof mock>;
+
+  beforeEach(() => {
+    sockPath = tmpSock();
+    posterMock = mock(async () => `thread-ts-${randomUUID()}`);
+    messageUpdaterMock = mock(async () => {});
+    reacterMock = mock(async () => {});
+    server = new IPCServer({
+      socketPath: sockPath,
+      poster: posterMock as any,
+      messageUpdater: messageUpdaterMock as any,
+      reacter: reacterMock as any,
+      channelId: 'C-test',
+    });
+  });
+
+  afterEach(async () => {
+    try {
+      await server.close();
+    } catch {
+      // already closed
+    }
+    try {
+      if (existsSync(sockPath)) unlinkSync(sockPath);
+    } catch {
+      // ignore
+    }
+  });
+
+  test('evictClient idempotency: disconnect notice posted exactly once on double call', async () => {
+    // Populate one client entry directly
+    const fakeSocket = {} as any;
+    server.clients.set('s1', {
+      label: 'test',
+      threadTs: 'thread-ts-s1',
+      socket: fakeSocket,
+    });
+    // Add a permRouting entry for s1
+    server.permRouting.set('req-s1', {
+      sessionId: 's1',
+      slackTs: 'slack-ts-s1',
+      timestamp: Date.now(),
+      toolName: 'Bash',
+      description: 'Run command',
+      inputPreview: 'ls',
+    });
+
+    // First call — should evict and post notice
+    server.evictClient('s1', { intentional: false, postNotice: true });
+    // Second call — should be a no-op (client already removed)
+    server.evictClient('s1', { intentional: false, postNotice: true });
+
+    // Allow any async poster calls to settle
+    await delay(50);
+
+    // Disconnect notice should have been posted exactly once
+    const noticeCalls = posterMock.mock.calls.filter(
+      (c: any) =>
+        c[0]?.text?.includes('disconnected') &&
+        c[0]?.thread_ts === 'thread-ts-s1',
+    );
+    expect(noticeCalls.length).toBe(1);
+
+    // Client entry must be removed
+    expect(server.clients.has('s1')).toBe(false);
+
+    // permRouting entries for s1 must be cleared
+    expect(server.permRouting.has('req-s1')).toBe(false);
+  });
+
+  test('evictClient race idempotency: handleClose after evictClient posts notice exactly once', async () => {
+    // Populate one client entry directly
+    const fakeSocket: any = {
+      data: {
+        sessionId: 's1',
+        intentionalClose: false,
+        lineBuffer: null,
+      },
+    };
+    server.clients.set('s1', {
+      label: 'test',
+      threadTs: 'thread-ts-race',
+      socket: fakeSocket,
+    });
+
+    // Simulate a bolt write-failure path calling evictClient first
+    server.evictClient('s1', { intentional: false, postNotice: true });
+
+    // Then the kernel close event fires, triggering handleClose for the same socket
+    // (handleClose is private, so we access it via a type cast)
+    (server as any).handleClose(fakeSocket);
+
+    // Allow async poster calls to settle
+    await delay(50);
+
+    // Disconnect notice should have been posted exactly once across both calls
+    const noticeCalls = posterMock.mock.calls.filter(
+      (c: any) =>
+        c[0]?.text?.includes('disconnected') &&
+        c[0]?.thread_ts === 'thread-ts-race',
+    );
+    expect(noticeCalls.length).toBe(1);
+  });
+});
+
 // ── routeVerdict Tests ──────────────────────────────────────────────────
 
 describe('routeVerdict', () => {
@@ -1522,6 +1635,71 @@ describe('IPCServer TTL sweep', () => {
   });
 });
 
+// ── InboundMessageSchema Tests ──────────────────────────────────────────
+
+describe('inbound_message schema', () => {
+  test('parses a valid inbound_message', () => {
+    const result = IPCMessageSchema.parse({
+      type: 'inbound_message',
+      text: 'hi',
+      eventTs: '123.456',
+      userId: 'U1',
+      channelId: 'C123',
+    });
+    expect(result).toEqual({
+      type: 'inbound_message',
+      text: 'hi',
+      eventTs: '123.456',
+      userId: 'U1',
+      channelId: 'C123',
+    });
+  });
+
+  test('throws when text is missing', () => {
+    expect(() =>
+      IPCMessageSchema.parse({
+        type: 'inbound_message',
+        eventTs: '123.456',
+        userId: 'U1',
+        channelId: 'C123',
+      }),
+    ).toThrow();
+  });
+
+  test('throws when eventTs is missing', () => {
+    expect(() =>
+      IPCMessageSchema.parse({
+        type: 'inbound_message',
+        text: 'hi',
+        userId: 'U1',
+        channelId: 'C123',
+      }),
+    ).toThrow();
+  });
+
+  test('throws when userId is missing', () => {
+    expect(() =>
+      IPCMessageSchema.parse({
+        type: 'inbound_message',
+        text: 'hi',
+        eventTs: '123.456',
+        channelId: 'C123',
+      }),
+    ).toThrow();
+  });
+
+  test('throws when channelId is missing', () => {
+    expect(() =>
+      IPCMessageSchema.parse({
+        type: 'inbound_message',
+        text: 'hi',
+        eventTs: '123.456',
+        userId: 'U1',
+      }),
+    ).toThrow();
+  });
+});
+
 // ── Multi-session IPC end-to-end integration ────────────────────────────
 //
 // These tests exercise higher-level IPC flows end-to-end:
@@ -1792,5 +1970,146 @@ describe('Multi-session IPC integration', () => {
 
     expect(server.clients.size).toBe(0);
     expect(server.clients.has('e2e-sess-1')).toBe(false);
+  });
+});
+
+// ── findClientByThread Tests ─────────────────────────────────────────────
+
+describe('findClientByThread', () => {
+  test('returns sessionId when threadTs matches, null when not found', () => {
+    const server = new IPCServer({
+      socketPath: '/tmp/test-find-client.sock',
+      poster: async () => 'ts',
+      messageUpdater: async () => {},
+      reacter: async () => {},
+      channelId: 'C_TEST',
+    });
+
+    const stubSocket = { write: () => true } as any;
+    server.clients.set('s1', {
+      label: 'l1',
+      threadTs: '1.001',
+      socket: stubSocket,
+    });
+
+    expect(server.findClientByThread('1.001')).toBe('s1');
+    expect(server.findClientByThread('9.999')).toBeNull();
+  });
+});
+
+// ── listClientThreads Tests ───────────────────────────────────────────────────
+
+describe('listClientThreads', () => {
+  test('returns array of { sessionId, threadTs } for all connected clients', () => {
+    const server = new IPCServer({
+      socketPath: '/tmp/test-list-clients.sock',
+      poster: async () => 'ts',
+      messageUpdater: async () => {},
+      reacter: async () => {},
+      channelId: 'C_TEST',
+    });
+
+    const stubSocket = { write: () => true } as any;
+    server.clients.set('s1', {
+      label: 'l1',
+      threadTs: '1.001',
+      socket: stubSocket,
+    });
+    server.clients.set('s2', {
+      label: 'l2',
+      threadTs: '2.002',
+      socket: stubSocket,
+    });
+
+    const result = server.listClientThreads();
+    // Order not guaranteed — compare as sorted arrays
+    const sorted = [...result].sort((a, b) =>
+      a.sessionId.localeCompare(b.sessionId),
+    );
+    expect(sorted).toEqual([
+      { sessionId: 's1', threadTs: '1.001' },
+      { sessionId: 's2', threadTs: '2.002' },
+    ]);
+  });
+
+  test('returns empty array when no clients connected', () => {
+    const server = new IPCServer({
+      socketPath: '/tmp/test-list-clients-empty.sock',
+      poster: async () => 'ts',
+      messageUpdater: async () => {},
+      reacter: async () => {},
+      channelId: 'C_TEST',
+    });
+
+    expect(server.listClientThreads()).toEqual([]);
+  });
+});
+
+// ── IPCClient onInboundMessage Tests ─────────────────────────────────────────
+
+describe('IPCClient onInboundMessage', () => {
+  const sockPath = `/tmp/test-inbound-${randomUUID()}.sock`;
+  let server: IPCServer;
+  let posterMock: ReturnType<typeof mock>;
+
+  beforeEach(async () => {
+    posterMock = mock(async () => 'ts-1');
+    server = new IPCServer({
+      socketPath: sockPath,
+      poster: posterMock as any,
+      messageUpdater: async () => {},
+    });
+    setActiveServer(server);
+    await server.start();
+  });
+
+  afterEach(async () => {
+    await server.close();
+    if (existsSync(sockPath)) unlinkSync(sockPath);
+  });
+
+  test('onInboundMessage fires with exact fields when server sends inbound_message', async () => {
+    let resolveInbound: (v: {
+      text: string;
+      eventTs: string;
+      userId: string;
+      channelId: string;
+    }) => void;
+    const inboundReceived = new Promise<{
+      text: string;
+      eventTs: string;
+      userId: string;
+      channelId: string;
+    }>((resolve) => {
+      resolveInbound = resolve;
+    });
+
+    const client = new IPCClient({
+      socketPath: sockPath,
+      sessionId: 'inbound-sess-1',
+      label: 'inbound-test',
+      onInboundMessage: (text, eventTs, userId, channelId) =>
+        resolveInbound({ text, eventTs, userId, channelId }),
+    });
+
+    // connect() resolves on register_ack — proper readiness signal
+    await client.connect();
+
+    // Server sends an inbound_message directly to the client
+    const msg: ServerMessage = {
+      type: 'inbound_message',
+      text: 'hello from slack',
+      eventTs: '1234567890.123456',
+      userId: 'U0123ABC',
+      channelId: 'C0456DEF',
+    };
+    server.sendTo('inbound-sess-1', msg);
+
+    const got = await inboundReceived;
+
+    expect(got.text).toBe('hello from slack');
+    expect(got.eventTs).toBe('1234567890.123456');
+    expect(got.userId).toBe('U0123ABC');
+    expect(got.channelId).toBe('C0456DEF');
   });
 });

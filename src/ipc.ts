@@ -87,6 +87,14 @@ export const PermResponseSchema = z.object({
   behavior: z.string(),
 });
 
+export const InboundMessageSchema = z.object({
+  type: z.literal('inbound_message'),
+  text: z.string(),
+  eventTs: z.string(),
+  userId: z.string(),
+  channelId: z.string(),
+});
+
 export const ShutdownSchema = z.object({
   type: z.literal('shutdown'),
 });
@@ -114,6 +122,7 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   NewThreadAckSchema,
   ReactAckSchema,
   PermResponseSchema,
+  InboundMessageSchema,
   ShutdownSchema,
   ErrorSchema,
 ]);
@@ -137,6 +146,7 @@ export type SendAckMessage = z.infer<typeof SendAckSchema>;
 export type NewThreadAckMessage = z.infer<typeof NewThreadAckSchema>;
 export type ReactAckMessage = z.infer<typeof ReactAckSchema>;
 export type PermResponseMessage = z.infer<typeof PermResponseSchema>;
+export type InboundMessage = z.infer<typeof InboundMessageSchema>;
 export type ShutdownMessage = z.infer<typeof ShutdownSchema>;
 export type ErrorMessage = z.infer<typeof ErrorSchema>;
 
@@ -600,12 +610,12 @@ export class IPCServer {
     }
   }
 
-  /** Handle client socket close: remove from connection map */
-  private handleClose(socket: BunSocket<SocketContext>): void {
-    const sessionId = socket.data?.sessionId;
-    if (!sessionId) return;
-
-    const intentional = socket.data?.intentionalClose === true;
+  /** Idempotent: no-op if the client is already removed. */
+  evictClient(
+    sessionId: string,
+    opts: { intentional: boolean; postNotice: boolean },
+  ): void {
+    if (!this.clients.has(sessionId)) return;
 
     const client = this.clients.get(sessionId);
     this.clients.delete(sessionId);
@@ -620,7 +630,7 @@ export class IPCServer {
     for (const [reqId, entry] of toRemove) {
       this.permRouting.delete(reqId);
       // Update pending Slack perm messages (best-effort) — skip on intentional close
-      if (!intentional && entry.slackTs) {
+      if (!opts.intentional && entry.slackTs) {
         this.opts
           .messageUpdater(
             this.opts.channelId,
@@ -633,7 +643,7 @@ export class IPCServer {
     }
 
     // Post "session disconnected" in the client's thread (best-effort) — skip on intentional close
-    if (!intentional && client?.threadTs) {
+    if (opts.postNotice && !opts.intentional && client?.threadTs) {
       this.opts
         .poster({
           text: '\u26a0\ufe0f Session disconnected.',
@@ -641,6 +651,14 @@ export class IPCServer {
         })
         .catch(() => {});
     }
+  }
+
+  private handleClose(socket: BunSocket<SocketContext>): void {
+    const sessionId = socket.data?.sessionId;
+    if (!sessionId) return;
+
+    const intentional = socket.data?.intentionalClose === true;
+    this.evictClient(sessionId, { intentional, postNotice: true });
   }
 
   /** Send a message to a specific client by sessionId */
@@ -667,6 +685,23 @@ export class IPCServer {
         // Client may already be disconnected
       }
     }
+  }
+
+  /** Return the sessionId whose threadTs matches, or null if not found */
+  findClientByThread(threadTs: string): string | null {
+    for (const [sessionId, entry] of this.clients.entries()) {
+      if (entry.threadTs === threadTs) return sessionId;
+    }
+    return null;
+  }
+
+  /** Return an array of { sessionId, threadTs } for all connected clients */
+  listClientThreads(): Array<{ sessionId: string; threadTs: string }> {
+    const result: Array<{ sessionId: string; threadTs: string }> = [];
+    for (const [sessionId, entry] of this.clients.entries()) {
+      result.push({ sessionId, threadTs: entry.threadTs });
+    }
+    return result;
   }
 
   /** Close the server: broadcast shutdown, close all sockets, unlink file */
@@ -773,6 +808,12 @@ export interface IPCClientOptions {
   label: string;
   onMessage?: (msg: ServerMessage) => void;
   onPermResponse?: (requestId: string, behavior: string) => void;
+  onInboundMessage?: (
+    text: string,
+    eventTs: string,
+    userId: string,
+    channelId: string,
+  ) => void;
   onDisconnect?: (info: { graceful: boolean }) => void;
   connectTimeoutMs?: number;
 }
@@ -866,6 +907,17 @@ export class IPCClient {
                 this.opts.onPermResponse?.(pr.requestId, pr.behavior);
               }
 
+              // Dispatch inbound_message to dedicated callback
+              if (msg.type === 'inbound_message') {
+                const im = msg as InboundMessage;
+                this.opts.onInboundMessage?.(
+                  im.text,
+                  im.eventTs,
+                  im.userId,
+                  im.channelId,
+                );
+              }
+
               // Dispatch to onMessage callback
               this.opts.onMessage?.(msg as ServerMessage);
 
@@ -953,13 +1005,19 @@ export class IPCClient {
     description: string,
     inputPreview: string,
   ): void {
-    this.send({
-      type: 'perm_request',
-      requestId,
-      toolName,
-      description,
-      inputPreview,
-    });
+    try {
+      this.send({
+        type: 'perm_request',
+        requestId,
+        toolName,
+        description,
+        inputPreview,
+      });
+      log(`sendPermRequest ${requestId} (${toolName}) written to IPC socket`);
+    } catch (err) {
+      log(`sendPermRequest ${requestId} (${toolName}) failed: ${err}`);
+      throw err;
+    }
   }
 
   /**

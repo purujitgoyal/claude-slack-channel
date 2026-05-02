@@ -31,6 +31,29 @@ export function stripMentions(text: string): string {
   return text.replace(MENTION_RE, '').trim();
 }
 
+/**
+ * Builds the `notifications/claude/channel` payload for a user-originated
+ * message. Shared by forwardInboundMessage in src/slack.ts and the IPC
+ * onInboundMessage callback in src/mcp.ts to prevent drift between the two
+ * paths.
+ */
+export function buildChannelNotification(
+  content: string,
+  meta: { userId: string; channelId: string; eventTs: string },
+) {
+  return {
+    method: 'notifications/claude/channel' as const,
+    params: {
+      content,
+      meta: {
+        slack_user_id: meta.userId,
+        channel_id: meta.channelId,
+        event_ts: meta.eventTs,
+      },
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Format raw JSON input_preview into a readable one-liner for confirmations
 // ---------------------------------------------------------------------------
@@ -127,13 +150,21 @@ export const SESSION_PATH = join(CHANNELS_DIR, 'session.json');
 export const LOCK_PATH = join(CHANNELS_DIR, 'server.lock');
 export const SOCKET_PATH = join(CHANNELS_DIR, 'primary.sock');
 
+// cwd in an MCP plugin subprocess is the plugin install dir, not the user's
+// workspace — so naked cwd produces labels like "0.9.0". Set from MCP roots when available.
+let projectDir: string | null = null;
+
+export function setProjectDir(dir: string | null): void {
+  projectDir = dir;
+}
+
 /**
  * Returns a human-readable session label: `basename(cwd):git-branch`.
  * Falls back to just `basename(cwd)` if not in a git repo or git fails.
  * Sanitized: trimmed, backticks stripped, truncated to 60 chars.
  */
 export function getSessionLabel(): string {
-  const cwd = process.cwd();
+  const cwd = projectDir ?? process.cwd();
   const base = basename(cwd);
 
   let branch = '';

@@ -89,11 +89,15 @@ const TEST_ACTIVE_THREAD = '1775644600.000000';
 // Import modules under test (after mock.module)
 // ---------------------------------------------------------------------------
 
-const { startSlack, stopSlack, resetBotUserId, recoverMissedMessages } =
-  await import('../src/slack');
-const { setActiveThreadTs, setLastSeenEventTs } = await import(
-  '../src/session'
-);
+const {
+  startSlack,
+  stopSlack,
+  resetBotUserId,
+  resetIpcBridge,
+  recoverMissedMessages,
+} = await import('../src/slack');
+const { setActiveThreadTs, setLastSeenEventTs, getLastSeenEventTs } =
+  await import('../src/session');
 
 // ---------------------------------------------------------------------------
 // Test setup / teardown
@@ -401,5 +405,322 @@ describe('recoverMissedMessages', () => {
       '1775644620.200000',
       '1775644620.300000',
     ]);
+  });
+});
+
+// =========================================================================
+// Client-thread recovery tests
+// =========================================================================
+
+const TEST_CLIENT_THREAD = '1.001';
+const TEST_CLIENT_SESSION = 's1';
+const TEST_PRIMARY_THREAD = '1775644600.000000'; // same as TEST_ACTIVE_THREAD
+
+describe('recoverMissedMessages — client-thread recovery', () => {
+  // These tests use a fresh startSlack with listClientThreads / forwardToClient /
+  // evictClient callbacks so we can verify recovery routes to the right place.
+
+  let forwardToClientMock: ReturnType<typeof mock>;
+  let evictClientMock: ReturnType<typeof mock>;
+  let listClientThreadsMock: ReturnType<typeof mock>;
+
+  // Per-test replies mock factory — set in each test
+  // The outer beforeEach already set up historyMock/repliesMock.
+  // Inner beforeEach restarts Slack with IPC callbacks.
+
+  beforeEach(async () => {
+    // Stop the app started by the outer beforeEach
+    await stopSlack();
+    resetIpcBridge();
+
+    forwardToClientMock = mock((_sid: string, _msg: any): boolean => true);
+    evictClientMock = mock((_sid: string): void => {});
+    listClientThreadsMock = mock(
+      (): Array<{ sessionId: string; threadTs: string }> => [
+        { sessionId: TEST_CLIENT_SESSION, threadTs: TEST_CLIENT_THREAD },
+      ],
+    );
+
+    // Reset mocks to empty defaults (outer beforeEach already reset them)
+    historyMock.mockResolvedValue({ ok: true, messages: [] });
+    repliesMock.mockResolvedValue({ ok: true, messages: [] });
+    mcpMock = { notification: mock(async () => {}) };
+
+    await startSlack({
+      mcp: mcpMock as any,
+      botToken: TEST_BOT_TOKEN,
+      appToken: TEST_APP_TOKEN,
+      channelId: TEST_CHANNEL_ID,
+      allowedUserId: TEST_ALLOWED_USER,
+      onDead: () => {},
+      ipc: {
+        findClientByThread: () => null,
+        forwardToClient: forwardToClientMock as any,
+        evictClient: evictClientMock as any,
+        listClientThreads: listClientThreadsMock as any,
+      },
+    });
+
+    setActiveThreadTs(TEST_PRIMARY_THREAD);
+    setLastSeenEventTs(null);
+    mcpMock.notification.mockClear();
+  });
+
+  // =========================================================================
+  // Step 7 test: recovery delivers missed client-thread reply via IPC
+  // =========================================================================
+
+  test('delivers missed client-thread reply to the owning IPC client', async () => {
+    const clientReplyTs = '1775644620.400000';
+    const clientReplyText = 'reply in client thread';
+
+    // history: no @mentions
+    historyMock.mockResolvedValue({ ok: true, messages: [] });
+
+    // replies: first call = primary's thread (no replies), second call = client's thread
+    repliesMock
+      .mockResolvedValueOnce({
+        ok: true,
+        messages: [
+          // Primary thread parent + one reply
+          {
+            user: TEST_ALLOWED_USER,
+            text: 'primary parent',
+            ts: TEST_PRIMARY_THREAD,
+            thread_ts: TEST_PRIMARY_THREAD,
+          },
+          {
+            user: TEST_ALLOWED_USER,
+            text: 'primary reply',
+            ts: '1775644620.200000',
+            thread_ts: TEST_PRIMARY_THREAD,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        messages: [
+          // Client thread parent + one reply
+          {
+            user: TEST_ALLOWED_USER,
+            text: 'client parent',
+            ts: TEST_CLIENT_THREAD,
+            thread_ts: TEST_CLIENT_THREAD,
+          },
+          {
+            user: TEST_ALLOWED_USER,
+            text: clientReplyText,
+            ts: clientReplyTs,
+            thread_ts: TEST_CLIENT_THREAD,
+          },
+        ],
+      });
+
+    const result = await recoverMissedMessages(mcpMock as any, null);
+
+    // forwardToClient called once with s1 and the correct envelope
+    expect(forwardToClientMock).toHaveBeenCalledTimes(1);
+    const [sid, envelope] = forwardToClientMock.mock.calls[0];
+    expect(sid).toBe(TEST_CLIENT_SESSION);
+    expect(envelope.type).toBe('inbound_message');
+    expect(envelope.text).toBe(clientReplyText);
+    expect(envelope.eventTs).toBe(clientReplyTs);
+    expect(envelope.userId).toBe(TEST_ALLOWED_USER);
+    expect(envelope.channelId).toBe(TEST_CHANNEL_ID);
+
+    // Primary's thread reply forwarded via mcp.notification (thread_reply)
+    expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+
+    // Cursor advanced to the most-recent ts
+    expect(getLastSeenEventTs()).toBe(clientReplyTs);
+
+    // recovered = 2 (one primary reply + one client reply)
+    expect(result.recovered).toBe(2);
+  });
+
+  // =========================================================================
+  // Step 11 test: stale client during recovery falls back to primary
+  // =========================================================================
+
+  test('evicts stale client and falls back to old_thread_reply on forwardToClient false', async () => {
+    forwardToClientMock = mock((_sid: string, _msg: any): boolean => false);
+
+    // Restart with the failing forwardToClient
+    await stopSlack();
+    resetIpcBridge();
+    mcpMock = { notification: mock(async () => {}) };
+    await startSlack({
+      mcp: mcpMock as any,
+      botToken: TEST_BOT_TOKEN,
+      appToken: TEST_APP_TOKEN,
+      channelId: TEST_CHANNEL_ID,
+      allowedUserId: TEST_ALLOWED_USER,
+      onDead: () => {},
+      ipc: {
+        findClientByThread: () => null,
+        forwardToClient: forwardToClientMock as any,
+        evictClient: evictClientMock as any,
+        listClientThreads: listClientThreadsMock as any,
+      },
+    });
+    setActiveThreadTs(TEST_PRIMARY_THREAD);
+    setLastSeenEventTs(null);
+    mcpMock.notification.mockClear();
+
+    const clientReplyTs = '1775644620.400000';
+
+    historyMock.mockResolvedValue({ ok: true, messages: [] });
+    repliesMock
+      .mockResolvedValueOnce({ ok: true, messages: [] }) // primary: no replies
+      .mockResolvedValueOnce({
+        ok: true,
+        messages: [
+          {
+            user: TEST_ALLOWED_USER,
+            text: 'client parent',
+            ts: TEST_CLIENT_THREAD,
+            thread_ts: TEST_CLIENT_THREAD,
+          },
+          {
+            user: TEST_ALLOWED_USER,
+            text: 'stale client reply',
+            ts: clientReplyTs,
+            thread_ts: TEST_CLIENT_THREAD,
+          },
+        ],
+      });
+
+    await recoverMissedMessages(mcpMock as any, null);
+
+    // evictClient called with the session ID
+    expect(evictClientMock).toHaveBeenCalledTimes(1);
+    expect(evictClientMock.mock.calls[0][0]).toBe(TEST_CLIENT_SESSION);
+
+    // Fallback: forwardInboundMessage called with old_thread_reply
+    // This goes through mcp.notification
+    expect(mcpMock.notification).toHaveBeenCalledTimes(1);
+    const notifParams = mcpMock.notification.mock.calls[0][0].params;
+    // old_thread_reply builds content with thread context prefix
+    expect(notifParams.meta.event_ts).toBe(clientReplyTs);
+
+    // Cursor advanced for the fallback delivery
+    expect(getLastSeenEventTs()).toBe(clientReplyTs);
+  });
+
+  // =========================================================================
+  // Step 13 test: primary recovery still works unchanged when no clients
+  // =========================================================================
+
+  test('primary recovery unchanged when listClientThreads returns empty', async () => {
+    listClientThreadsMock = mock(
+      (): Array<{ sessionId: string; threadTs: string }> => [],
+    );
+
+    // Restart with no clients
+    await stopSlack();
+    resetIpcBridge();
+    mcpMock = { notification: mock(async () => {}) };
+    await startSlack({
+      mcp: mcpMock as any,
+      botToken: TEST_BOT_TOKEN,
+      appToken: TEST_APP_TOKEN,
+      channelId: TEST_CHANNEL_ID,
+      allowedUserId: TEST_ALLOWED_USER,
+      onDead: () => {},
+      ipc: {
+        findClientByThread: () => null,
+        forwardToClient: forwardToClientMock as any,
+        evictClient: evictClientMock as any,
+        listClientThreads: listClientThreadsMock as any,
+      },
+    });
+    setActiveThreadTs(TEST_PRIMARY_THREAD);
+    setLastSeenEventTs(null);
+    mcpMock.notification.mockClear();
+
+    const primaryReplyTs = '1775644620.200000';
+
+    historyMock.mockResolvedValue({
+      ok: true,
+      messages: [
+        {
+          user: TEST_ALLOWED_USER,
+          text: `<@${TEST_BOT_USER_ID}> a mention`,
+          ts: '1775644620.100000',
+        },
+      ],
+    });
+    repliesMock.mockResolvedValueOnce({
+      ok: true,
+      messages: [
+        {
+          user: TEST_ALLOWED_USER,
+          text: 'primary parent',
+          ts: TEST_PRIMARY_THREAD,
+          thread_ts: TEST_PRIMARY_THREAD,
+        },
+        {
+          user: TEST_ALLOWED_USER,
+          text: 'primary reply',
+          ts: primaryReplyTs,
+          thread_ts: TEST_PRIMARY_THREAD,
+        },
+      ],
+    });
+
+    const result = await recoverMissedMessages(mcpMock as any, null);
+
+    // forwardToClient never called (no clients)
+    expect(forwardToClientMock).not.toHaveBeenCalled();
+
+    // Primary @mention + reply forwarded via mcp.notification
+    expect(mcpMock.notification).toHaveBeenCalledTimes(2);
+
+    // conversations.replies only called once (for primary's active thread)
+    expect(repliesMock).toHaveBeenCalledTimes(1);
+
+    // Cursor advanced
+    expect(getLastSeenEventTs()).toBe(primaryReplyTs);
+
+    expect(result.recovered).toBe(2);
+  });
+
+  // =========================================================================
+  // Guard test: bridge not wired at all → recovery has no client threads to
+  // consult, client-thread replies simply aren't fetched, primary path runs.
+  // =========================================================================
+
+  test('recovery runs without client-thread fetch when no IPC bridge is wired', async () => {
+    await stopSlack();
+    resetIpcBridge();
+    mcpMock = { notification: mock(async () => {}) };
+    await startSlack({
+      mcp: mcpMock as any,
+      botToken: TEST_BOT_TOKEN,
+      appToken: TEST_APP_TOKEN,
+      channelId: TEST_CHANNEL_ID,
+      allowedUserId: TEST_ALLOWED_USER,
+      onDead: () => {},
+      // No ipc bridge — mirrors legacy primary-only wiring
+    });
+    setActiveThreadTs(TEST_PRIMARY_THREAD);
+    setLastSeenEventTs(null);
+    mcpMock.notification.mockClear();
+
+    historyMock.mockResolvedValue({ ok: true, messages: [] });
+    repliesMock.mockResolvedValueOnce({ ok: true, messages: [] });
+
+    let threw = false;
+    try {
+      await recoverMissedMessages(mcpMock as any, null);
+    } catch {
+      threw = true;
+    }
+
+    expect(threw).toBe(false);
+    // Only primary replies fetched — no client-thread fetch attempted.
+    expect(repliesMock).toHaveBeenCalledTimes(1);
+    expect(forwardToClientMock).not.toHaveBeenCalled();
+    expect(evictClientMock).not.toHaveBeenCalled();
   });
 });

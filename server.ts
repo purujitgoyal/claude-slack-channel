@@ -13,6 +13,7 @@ import {
 } from './src/mcp.ts';
 import {
   getLastSeenEventTs,
+  loadSession,
   saveSession,
   setActiveThreadTs,
 } from './src/session.ts';
@@ -137,6 +138,12 @@ async function activate(): Promise<void> {
   }
   startWatchdog();
 
+  // Capture any stale threadTs left on disk by a predecessor that died without
+  // running its cleanup path — clean deactivate() writes threadTs: null, so a
+  // non-null value here is a tombstone signal. Posted after startSlack() so the
+  // Bolt client is alive.
+  const staleThread = loadSession().threadTs;
+
   try {
     setActiveThreadTs(null);
     saveSession({ threadTs: null, lastSeenEventTs: getLastSeenEventTs() });
@@ -184,6 +191,18 @@ async function activate(): Promise<void> {
     await server.start();
     ipcServer = server;
     setActiveServer(server);
+
+    if (staleThread) {
+      try {
+        await postThreaded({
+          thread_ts: staleThread,
+          text: '⚠️ Previous session ended unexpectedly — reconnected.',
+        });
+        log(`posted tombstone to stale thread ${staleThread}`);
+      } catch (err) {
+        log(`tombstone post to ${staleThread} failed: ${err}`);
+      }
+    }
 
     setMode('connected');
     log(`channel activated — ${channelId}`);
@@ -262,6 +281,22 @@ if (import.meta.main) {
   process.on('SIGINT', () => shutdownGracefully('SIGINT'));
   process.on('SIGTERM', () => shutdownGracefully('SIGTERM'));
   process.stdin.on('close', () => shutdownGracefully('stdin-close'));
+
+  // Convert in-process panics into a graceful shutdown so the farewell-posting
+  // path runs and the next activation has a clean session.json. The
+  // shuttingDown guard makes this idempotent against a racing signal.
+  process.on('uncaughtException', (err) => {
+    log(`uncaughtException: ${err.stack ?? err.message ?? err}`);
+    shutdownGracefully('uncaughtException');
+  });
+  process.on('unhandledRejection', (reason) => {
+    const text =
+      reason instanceof Error
+        ? (reason.stack ?? reason.message)
+        : String(reason);
+    log(`unhandledRejection: ${text}`);
+    shutdownGracefully('unhandledRejection');
+  });
 
   // ---------------------------------------------------------------------------
   // Connect MCP transport

@@ -27,6 +27,7 @@ import { SESSION_PATH } from '../src/config';
 import {
   getActiveThreadTs,
   getLastSeenEventTs,
+  loadSession,
   resolvedPermissions,
   saveSession,
   setActiveThreadTs,
@@ -182,6 +183,98 @@ describe('Session State', () => {
       const parsed = JSON.parse(readFileSync(SESSION_PATH, 'utf8'));
       expect(parsed.lastSeenEventTs).toBe('1775644620.743929');
       expect(parsed.threadTs).toBeNull();
+    });
+  });
+
+  // =========================================================================
+  // loadSession — read persisted state from disk
+  // =========================================================================
+
+  describe('loadSession', () => {
+    beforeEach(() => {
+      // Ensure a clean disk state for each load test
+      if (existsSync(SESSION_PATH)) rmSync(SESSION_PATH);
+    });
+
+    test('returns nulls when session file is missing', () => {
+      expect(loadSession()).toEqual({
+        threadTs: null,
+        lastSeenEventTs: null,
+      });
+    });
+
+    test('returns nulls when session file is empty', () => {
+      writeFileSync(SESSION_PATH, '', 'utf8');
+      expect(loadSession()).toEqual({
+        threadTs: null,
+        lastSeenEventTs: null,
+      });
+    });
+
+    test('returns nulls when session file is whitespace only', () => {
+      writeFileSync(SESSION_PATH, '   \n  ', 'utf8');
+      expect(loadSession()).toEqual({
+        threadTs: null,
+        lastSeenEventTs: null,
+      });
+    });
+
+    test('returns nulls when session file is malformed JSON', () => {
+      writeFileSync(SESSION_PATH, '{not json', 'utf8');
+      expect(loadSession()).toEqual({
+        threadTs: null,
+        lastSeenEventTs: null,
+      });
+    });
+
+    test('reads both fields when present', () => {
+      writeFileSync(
+        SESSION_PATH,
+        JSON.stringify({
+          threadTs: '1234.5678',
+          lastSeenEventTs: '1775644620.743929',
+        }),
+        'utf8',
+      );
+      expect(loadSession()).toEqual({
+        threadTs: '1234.5678',
+        lastSeenEventTs: '1775644620.743929',
+      });
+    });
+
+    test('coerces non-string fields to null', () => {
+      writeFileSync(
+        SESSION_PATH,
+        JSON.stringify({ threadTs: 1234, lastSeenEventTs: true }),
+        'utf8',
+      );
+      expect(loadSession()).toEqual({
+        threadTs: null,
+        lastSeenEventTs: null,
+      });
+    });
+
+    test('round-trips with saveSession', () => {
+      saveSession({
+        threadTs: '5000.0000',
+        lastSeenEventTs: '6000.0000',
+      });
+      expect(loadSession()).toEqual({
+        threadTs: '5000.0000',
+        lastSeenEventTs: '6000.0000',
+      });
+    });
+
+    test('detects stale threadTs from a crashed predecessor', () => {
+      // Simulate: prior subprocess wrote a thread but died before deactivate()
+      // could clear it. The next activation should see the stale thread here.
+      saveSession({
+        threadTs: '9999.0001',
+        lastSeenEventTs: '1234.5678',
+      });
+      const loaded = loadSession();
+      expect(loaded.threadTs).toBe('9999.0001');
+      expect(loaded.lastSeenEventTs).toBe('1234.5678');
     });
   });
 });

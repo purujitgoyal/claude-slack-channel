@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { ensureChannelsDir, log, SESSION_PATH } from './config.ts';
 
 // ---------------------------------------------------------------------------
@@ -26,6 +26,39 @@ export function saveSession(state: {
     writeFileSync(SESSION_PATH, JSON.stringify(state), 'utf8');
   } catch (err) {
     log(`failed to save session state: ${err}`);
+  }
+}
+
+/**
+ * Reads the persisted session state from disk. Returns both fields as null when
+ * the file is missing, empty, or unparseable — callers should treat those cases
+ * as "no prior state" rather than as errors.
+ *
+ * Used at activate() time to detect a stale `threadTs` left behind by a prior
+ * subprocess that died without running its cleanup path. A clean deactivate()
+ * always writes `threadTs: null`, so a non-null value here is the tombstone
+ * signal.
+ */
+export function loadSession(): {
+  threadTs: string | null;
+  lastSeenEventTs: string | null;
+} {
+  const empty = { threadTs: null, lastSeenEventTs: null };
+  if (!existsSync(SESSION_PATH)) return empty;
+  try {
+    const raw = readFileSync(SESSION_PATH, 'utf8');
+    if (!raw.trim()) return empty;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const threadTs =
+      typeof parsed.threadTs === 'string' ? parsed.threadTs : null;
+    const lastSeenEventTs =
+      typeof parsed.lastSeenEventTs === 'string'
+        ? parsed.lastSeenEventTs
+        : null;
+    return { threadTs, lastSeenEventTs };
+  } catch (err) {
+    log(`failed to load session state: ${err}`);
+    return empty;
   }
 }
 
